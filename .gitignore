@@ -1,0 +1,15 @@
+# vim swap files
+*.swn
+*.swp
+*.swo
+
+# backups
+*~
+
+# binaries
+build/bin/
+test/bin/
+deployments/
+
+# logs
+test/logs.txt
