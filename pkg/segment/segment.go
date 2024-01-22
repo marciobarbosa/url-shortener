@@ -301,6 +301,8 @@ func Init(params InitParams) (error) {
     if err != nil {
 	return err
     }
+
+    state = RUNNING
     return nil;
 }
 
