@@ -1,0 +1,62 @@
+#!/usr/bin/bash
+
+HOST=localhost
+PORT=8081
+KVSERVER=../build/bin/kv-server
+CLIENT=../build/bin/client
+DATABASEDIR=./database
+
+pass=0
+fail=0
+
+data="just testing here"
+
+# Create directory
+mkdir ${DATABASEDIR}
+
+# Init KV-Server
+echo "Initializing KV-Server..."
+${KVSERVER} -a ${HOST} -p ${PORT} -ll INFO -d ${DATABASEDIR} -s LFU -c 10 &
+kvserver_pid=$!
+
+# Create 500 entries
+echo "Creating 500 entries..."
+for i in {1..500} ; do
+
+msg="connect ${HOST} ${PORT}\nsend put a$i $data\nquit\n"
+output=$(printf "$msg" | ${CLIENT})
+echo $output | grep "put_success" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo $output | grep "put_update" &> /dev/null
+    if [ $? -eq 0 ] ; then
+	((pass++))
+    else
+        echo "  FAIL: $output" ;
+        ((fail++))
+    fi
+fi
+
+done
+
+# Get entries
+echo "Getting 500 entries..."
+for i in {1..500} ; do
+
+msg="connect ${HOST} ${PORT}\nsend get a$i\nquit\n"
+output=$(printf "$msg" | $CLIENT)
+echo $output | grep "just testing here" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo "  FAIL 2: $output" ;
+    ((fail++))
+fi
+
+done
+
+kill $kvserver_pid
+
+echo
+echo "Passed: $pass ; Failed: $fail"
