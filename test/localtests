@@ -1,10 +1,21 @@
 #!/usr/bin/bash
 
+CDIR=$(pwd)
 HOST=localhost
 PORT=8081
 KVSERVER=../build/bin/kv-server
 CLIENT=../build/bin/client
 DATABASEDIR=./database
+
+if [ -n "$1" ]; then
+    CLIENT="$1"
+fi
+if [ -n "$2" ]; then
+    KVSERVER="$2"
+fi
+if [ -n "$3" ]; then
+    DATABASEDIR="$3"
+fi
 
 pass=0
 fail=0
