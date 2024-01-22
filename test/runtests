@@ -1,0 +1,129 @@
+#!/usr/bin/bash
+
+pass=0
+fail=0
+
+data="just testing here"
+
+# Create network
+docker network create -d bridge docker-net
+
+# Init KV-Server
+echo "Initializing KV-Server..."
+docker run -d --rm -p 43203:43203 --name kv-server0 --network docker-net kv-server -a kv-server0 -p 43203 -ll INFO -d process_data -s LFU -c 10
+
+# Create 500 entries
+echo "Creating 500 entries..."
+for i in {1..500} ; do
+
+msg="connect kv-server0 43203\nsend put a$i $data\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "put_success" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo $output | grep "put_update" &> /dev/null
+    if [ $? -eq 0 ] ; then
+	((pass++))
+    else
+        echo "  FAIL: $output" ;
+        ((fail++))
+    fi
+fi
+
+done
+
+# Get entries
+echo "Getting 500 entries..."
+for i in {1..500} ; do
+
+msg="connect kv-server0 43203\nsend get a$i\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "just testing here" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo "  FAIL 2: $output" ;
+    ((fail++))
+fi
+
+done
+
+# Create more entries
+echo "Creating more entries..."
+for i in {501..1000} ; do
+
+msg="connect kv-server0 43203\nsend put a$i $data\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "put_success" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo $output | grep "put_update" &> /dev/null
+    if [ $? -eq 0 ] ; then
+	((pass++))
+    else
+        echo "  FAIL: $output" ;
+        ((fail++))
+    fi
+fi
+
+done
+
+# Get entries
+echo "Getting entries..."
+for i in {1..1000} ; do
+
+msg="connect kv-server0 43203\nsend get a$i\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "just testing here" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo "  FAIL 2: $output" ;
+    ((fail++))
+fi
+
+done
+
+# Create more entries
+echo "Creating more entries..."
+for i in {1001..1500} ; do
+
+msg="connect kv-server0 43203\nsend put a$i $data\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "put_success" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo $output | grep "put_update" &> /dev/null
+    if [ $? -eq 0 ] ; then
+	((pass++))
+    else
+        echo "  FAIL: $output" ;
+        ((fail++))
+    fi
+fi
+
+done
+
+# Get entries
+echo "Getting entries..."
+for i in {1..1500} ; do
+
+msg="connect kv-server0 43203\nsend get a$i\nquit\n"
+output=$(printf "$msg" | docker run -i --network docker-net client)
+echo $output | grep "just testing here" &> /dev/null
+if [ $? -eq 0 ] ; then
+    ((pass++))
+else
+    echo "  FAIL 2: $output" ;
+    ((fail++))
+fi
+
+done
+
+docker stop kv-server0
+
+echo
+echo "Passed: $pass ; Failed: $fail"
