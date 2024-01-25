@@ -11,6 +11,7 @@ import (
     "syscall"
     "os/signal"
     "github.com/marciobarbosa/url-shortener/pkg/log"
+    "github.com/marciobarbosa/url-shortener/pkg/raft"
     "github.com/marciobarbosa/url-shortener/pkg/segment"
     "github.com/marciobarbosa/url-shortener/pkg/database"
 )
@@ -28,6 +29,9 @@ var cachepolicy string
 
 // default directory
 var directory string = "."
+
+// cluster of servers
+var cluster []string
 
 // Parse options given by the user
 //
@@ -88,6 +92,13 @@ func ParseCmd(parms []string) {
 		os.Exit(1)
 	    }
 	    cachepolicy = parms[parm_i+1]
+	    parm_i += 2
+	case "-n":
+	    if nparams < 2 {
+		PrintHelp()
+		os.Exit(1)
+	    }
+	    cluster = append(cluster, parms[parm_i+1])
 	    parm_i += 2
 	case "-h":
 	    PrintHelp()
@@ -246,6 +257,9 @@ func Start() {
     if !set {
 	panic(errors.New("Could not set log level"))
     }
+    if len(cluster) == 0 {
+	panic(errors.New("No cluster provided"))
+    }
 
     addr := ipaddr + ":" + port
     ln, err := net.Listen("tcp", addr)
@@ -254,6 +268,8 @@ func Start() {
     }
     defer ln.Close()
 
+    raft.Start(ipaddr, cluster)
+
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 
     sigs := make(chan os.Signal, 1)
@@ -261,6 +277,7 @@ func Start() {
 
     go func() {
 	<-sigs
+	raft.Stop()
 	segment.FlushCache()
 	os.Exit(0)
     }()
@@ -277,7 +294,7 @@ func Start() {
 // Print available options
 func PrintHelp() {
     fmt.Println("-a <ip> -p <port> -d <directory> -l <log> -ll <loglevel>")
-    fmt.Println("-c <cachesize> -s <cachepolicy> -h")
+    fmt.Println("-c <cachesize> -s <cachepolicy> -n <node> -h")
 }
 
 // Print provided options
