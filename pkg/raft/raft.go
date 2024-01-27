@@ -58,7 +58,7 @@ func Start(ipaddr string, servers []string, debug bool) error {
     if (debug) {
 	trace = true
 	flags := (os.O_RDWR | os.O_CREATE | os.O_TRUNC)
-	trace_file, err = os.OpenFile("raft.txt", flags, 0644)
+	trace_file, err = os.OpenFile("/tmp/raft.txt", flags, 0644)
 	if err != nil {
 	    return err
 	}
