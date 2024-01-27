@@ -43,7 +43,8 @@ var term int			// current term number
 var state int			// current state
 var votedfor int		// candidate id we voted for
 var logs []LogEntry		// log entries
-var cluster []Server		// servers in the cluster
+//var cluster []Server		// servers in the cluster
+var cluster map[int]Server
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 var mutex sync.Mutex		// lock for shared data
 
@@ -79,8 +80,9 @@ func Start(ipaddr string, servers []string, debug bool) error {
 	    continue
 	}
 	addr := server + ":" + port
-	svr := Server{Id: index, Addr: addr, Up: false}
-	cluster = append(cluster, svr)
+	svr := Server{Id: index, Addr: addr, Up: true}
+	//cluster = append(cluster, svr)
+	cluster[index] = svr
     }
     go rpc.Accept(listener)
     go ElectionTimer()
@@ -133,6 +135,7 @@ func Heartbeat() {
 	    mutex.Lock()
 	    defer mutex.Unlock()
 
+	    // Should count number of responses and if we don't get enough, start a new election.
 	    if reply.Term > currentterm {
 		DebugMsg("Heartbeat canceled: Server " + server.Addr + " has a better term")
 		BecomeFollower(reply.Term)
@@ -334,7 +337,7 @@ type VoteReply struct {
     VoteGranted bool
 }
 
-func (r *RaftRPC) RequestVotes(args *VoteRequest, reply *VoteReply) error {
+func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
     mutex.Lock()
     defer mutex.Unlock()
 
@@ -344,7 +347,7 @@ func (r *RaftRPC) RequestVotes(args *VoteRequest, reply *VoteReply) error {
     reply.VoteGranted = false
 
     if args.Term > term {
-	DebugMsg("RequestVotes: better term from " + cluster[args.CandidateId].Addr)
+	DebugMsg("RequestVote: better term from " + cluster[args.CandidateId].Addr)
 	BecomeFollower(args.Term)
     }
     if args.Term == term && (votedfor == -1 || votedfor == args.CandidateId) {
