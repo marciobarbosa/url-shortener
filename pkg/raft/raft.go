@@ -55,6 +55,7 @@ func Start(ipaddr string, servers []string, debug bool) error {
     votedfor = -1
     state = FOLLOWER
     lastiteraction = time.Now()
+    cluster = make(map[int]Server)
 
     if (debug) {
 	trace = true
