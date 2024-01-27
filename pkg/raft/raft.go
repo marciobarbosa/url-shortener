@@ -107,15 +107,6 @@ func BecomeFollower(newterm int) {
     go ElectionTimer()
 }
 
-func BecomeCandidate(newterm int) {
-    state = CANDIDATE
-    term = newterm
-    votedfor = -1
-    lastiteraction = time.Now()
-    DebugMsg("Became candidate")
-    go ElectionTimer()
-}
-
 func Heartbeat() {
     mutex.Lock()
     if state != LEADER {
@@ -124,7 +115,6 @@ func Heartbeat() {
     }
     currentterm := term
     mutex.Unlock()
-    ncrashed := 0
 
     for _, server := range cluster {
 	args := &AppendEntriesRequest{ Term: currentterm, LeaderId: servid }
@@ -133,24 +123,12 @@ func Heartbeat() {
 
 	    client, err := rpc.Dial("tcp", server.Addr)
 	    if err != nil {
-		mutex.Lock()
-		defer mutex.Unlock()
-		ncrashed++
-		if ncrashed == (len(cluster) + 1) / 2 {
-		    BecomeCandidate(term)
-		}
 		return
 	    }
 	    defer client.Close()
 
 	    err = client.Call("RaftRPC.AppendEntries", args, &reply)
 	    if err != nil {
-		mutex.Lock()
-		defer mutex.Unlock()
-		ncrashed++
-		if ncrashed == (len(cluster) + 1) / 2 {
-		    BecomeCandidate(term)
-		}
 		return
 	    }
 
