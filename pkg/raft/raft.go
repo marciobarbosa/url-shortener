@@ -1,6 +1,8 @@
 package raft
 
 import (
+    "os"
+    "fmt"
     "net"
     "sync"
     "time"
@@ -17,6 +19,9 @@ var servid int
 
 var listener net.Listener
 var shutdown bool = false
+
+var trace bool = false
+var trace_file *os.File = nil
 
 const (
     FOLLOWER = iota
@@ -37,18 +42,27 @@ type LogEntry struct {
 var term int			// current term number
 var state int			// current state
 var votedfor int		// candidate id we voted for
-var log []LogEntry		// log entries
+var logs []LogEntry		// log entries
 var cluster []Server		// servers in the cluster
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string) error {
+func Start(ipaddr string, servers []string, debug bool) error {
     var err error
 
     term = 0
     votedfor = -1
     state = FOLLOWER
     lastiteraction = time.Now()
+
+    if (debug) {
+	trace = true
+	flags := (os.O_RDWR | os.O_CREATE | os.O_TRUNC)
+	trace_file, err = os.OpenFile("raft.txt", flags, 0644)
+	if err != nil {
+	    return err
+	}
+    }
 
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
@@ -75,6 +89,10 @@ func Start(ipaddr string, servers []string) error {
 }
 
 func Stop() {
+    if (trace) {
+	trace_file.Close()
+	trace = false
+    }
     shutdown = true
     listener.Close()
 }
@@ -84,6 +102,7 @@ func BecomeFollower(newterm int) {
     term = newterm
     votedfor = -1
     lastiteraction = time.Now()
+    DebugMsg("Became follower")
     go ElectionTimer()
 }
 
@@ -115,6 +134,7 @@ func Heartbeat() {
 	    defer mutex.Unlock()
 
 	    if reply.Term > currentterm {
+		DebugMsg("Heartbeat canceled: Server " + server.Addr + " has a better term")
 		BecomeFollower(reply.Term)
 		return
 	    }
@@ -124,6 +144,7 @@ func Heartbeat() {
 
 func BecomeLeader() {
     state = LEADER
+    DebugMsg("Became leader")
 
     go func() {
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -139,6 +160,7 @@ func BecomeLeader() {
 	    mutex.Lock()
 	    if state != LEADER {
 		// heard from another peer with a better term.
+		DebugMsg("Heartbeat canceled")
 		mutex.Unlock()
 		return
 	    }
@@ -153,6 +175,7 @@ func StartElection() {
     votedfor = servid
     lastiteraction = time.Now()
 
+    DebugMsg("Starting election")
     currentterm := term
     nvotes := 1
 
@@ -171,6 +194,7 @@ func StartElection() {
 	    }
 	    defer client.Close()
 
+	    DebugMsg("Requesting vote from " + server.Addr)
 	    err = client.Call("RaftRPC.RequestVote", args, &reply)
 	    if err != nil {
 		return
@@ -183,16 +207,19 @@ func StartElection() {
 		// if we already have enoght votes from other rpcs or if we
 		// became a follower because other rpcs found out that there is
 		// another noder with a better term.
+		DebugMsg("Election canceled")
 		return
 	    }
 	    if reply.Term > term {
 		// another candidate won the election while we were requesting
 		// votes.
+		DebugMsg("Election canceled")
 		BecomeFollower(reply.Term)
 		return
 	    }
 	    if reply.Term == currentterm && reply.VoteGranted {
 		nvotes++
+		DebugMsg("Received vote from " + server.Addr)
 		if nvotes <= (len(cluster) + 1) / 2 {
 		    return
 		}
@@ -202,6 +229,16 @@ func StartElection() {
 	}(server)
     }
     go ElectionTimer()
+}
+
+func DebugMsg(msg string) {
+    if !trace {
+	return
+    }
+    prefix := time.Now().Format("2006-01-02 15:04:05")
+    suffix := fmt.Sprintf(" (term: %v, state: %v, votedfor: %v, servaddr: %v)", term, state, votedfor, servaddr)
+    trace_file.WriteString(prefix + ": " + msg + suffix + "\n")
+    trace_file.Sync()
 }
 
 // Time to wait before starting an election. Avoid starting an election at the
@@ -214,6 +251,7 @@ func ElectionTimer() {
 
     mutex.Lock()
     currentterm := term
+    DebugMsg("Election timer started: " + timeout.String())
     mutex.Unlock()
 
     ticker := time.NewTicker(10 * time.Millisecond)
@@ -232,6 +270,7 @@ func ElectionTimer() {
 	    // from a leader in a higher term; this will trigger another
 	    // BecomeFollower call that launches a new timer goroutine. return
 	    // this one).
+	    DebugMsg("Election timer canceled")
 	    mutex.Unlock()
 	    return
 	}
@@ -268,6 +307,7 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
     reply.Success = false
 
     if args.Term > term {
+	DebugMsg("AppendEntries: better term from " + cluster[args.LeaderId].Addr)
 	BecomeFollower(args.Term)
     }
     if args.Term == term {
@@ -304,6 +344,7 @@ func (r *RaftRPC) RequestVotes(args *VoteRequest, reply *VoteReply) error {
     reply.VoteGranted = false
 
     if args.Term > term {
+	DebugMsg("RequestVotes: better term from " + cluster[args.CandidateId].Addr)
 	BecomeFollower(args.Term)
     }
     if args.Term == term && (votedfor == -1 || votedfor == args.CandidateId) {

@@ -268,7 +268,11 @@ func Start() {
     }
     defer ln.Close()
 
-    raft.Start(ipaddr, cluster)
+    debug := false
+    if loglevel == "DEBUG" {
+	debug = true
+    }
+    raft.Start(ipaddr, cluster, debug)
 
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 
