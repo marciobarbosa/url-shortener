@@ -17,6 +17,7 @@ const (
     OFF		= "OFF"
     SEVERE	= "SEVERE"
     WARNING	= "WARNING"
+    DEBUG	= "DEBUG"
 )
 var logLevel = INFO
 var logFile *os.File = nil
@@ -37,6 +38,7 @@ func SetLevel(level string) (bool, string) {
     case OFF:
     case SEVERE:
     case WARNING:
+    case DEBUG:
     default:
 	retMsg = "loglevel " + level + " does not exist"
 	return false, retMsg
@@ -49,6 +51,9 @@ func SetLevel(level string) (bool, string) {
 }
 
 func Log(msg string, level string) {
+    if logFile == nil {
+	return
+    }
     if (level == logLevel) {
 	log.Printf("[%v] " + msg, logLevel)
     }
