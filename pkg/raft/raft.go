@@ -43,8 +43,7 @@ var term int			// current term number
 var state int			// current state
 var votedfor int		// candidate id we voted for
 var logs []LogEntry		// log entries
-//var cluster []Server		// servers in the cluster
-var cluster map[int]Server
+var cluster map[int]Server	// servers in the cluster
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 var mutex sync.Mutex		// lock for shared data
 
@@ -82,7 +81,6 @@ func Start(ipaddr string, servers []string, debug bool) error {
 	}
 	addr := server + ":" + port
 	svr := Server{Id: index, Addr: addr, Up: true}
-	//cluster = append(cluster, svr)
 	cluster[index] = svr
     }
     go rpc.Accept(listener)
@@ -109,6 +107,15 @@ func BecomeFollower(newterm int) {
     go ElectionTimer()
 }
 
+func BecomeCandidate(newterm int) {
+    state = CANDIDATE
+    term = newterm
+    votedfor = -1
+    lastiteraction = time.Now()
+    DebugMsg("Became candidate")
+    go ElectionTimer()
+}
+
 func Heartbeat() {
     mutex.Lock()
     if state != LEADER {
@@ -117,26 +124,39 @@ func Heartbeat() {
     }
     currentterm := term
     mutex.Unlock()
+    ncrashed := 0
 
     for _, server := range cluster {
 	args := &AppendEntriesRequest{ Term: currentterm, LeaderId: servid }
 	go func(server Server) {
 	    var reply AppendEntriesReply
+
 	    client, err := rpc.Dial("tcp", server.Addr)
 	    if err != nil {
+		mutex.Lock()
+		defer mutex.Unlock()
+		ncrashed++
+		if ncrashed == (len(cluster) + 1) / 2 {
+		    BecomeCandidate(term)
+		}
 		return
 	    }
 	    defer client.Close()
 
 	    err = client.Call("RaftRPC.AppendEntries", args, &reply)
 	    if err != nil {
+		mutex.Lock()
+		defer mutex.Unlock()
+		ncrashed++
+		if ncrashed == (len(cluster) + 1) / 2 {
+		    BecomeCandidate(term)
+		}
 		return
 	    }
 
 	    mutex.Lock()
 	    defer mutex.Unlock()
 
-	    // Should count number of responses and if we don't get enough, start a new election.
 	    if reply.Term > currentterm {
 		DebugMsg("Heartbeat canceled: Server " + server.Addr + " has a better term")
 		BecomeFollower(reply.Term)
