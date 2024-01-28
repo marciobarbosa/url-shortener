@@ -42,9 +42,14 @@ type LogEntry struct {
 var term int			// current term number
 var state int			// current state
 var votedfor int		// candidate id we voted for
+var commitidx int		// index of highest log entry known to be committed
+var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
+
 var logs []LogEntry		// log entries
 var cluster map[int]Server	// servers in the cluster
-var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
+var server_nextidx map[int]int	// next log index to send to each server
+var server_matchidx map[int]int	// highest log index known to be replicated on each server
+
 var mutex sync.Mutex		// lock for shared data
 
 func Start(ipaddr string, servers []string, debug bool) error {
@@ -52,9 +57,13 @@ func Start(ipaddr string, servers []string, debug bool) error {
 
     term = 0
     votedfor = -1
+    commitidx = -1
     state = FOLLOWER
     lastiteraction = time.Now()
+
     cluster = make(map[int]Server)
+    server_nextidx = make(map[int]int)
+    server_matchidx = make(map[int]int)
 
     if (debug) {
 	trace = true
@@ -121,6 +130,20 @@ func Heartbeat() {
 	go func(server Server) {
 	    var reply AppendEntriesReply
 
+	    mutex.Lock()
+	    nextidx := server_nextidx[server.Id]
+	    prevlogidx := nextidx - 1
+
+	    prevlogterm := -1
+	    if prevlogidx >= 0 {
+		prevlogterm = logs[prevlogidx].Term
+	    }
+	    args.PrevLogTerm = prevlogterm
+	    args.PrevLogIndex = prevlogidx
+	    args.LeaderCommit = commitidx
+	    args.Entries = logs[nextidx:]
+	    mutex.Unlock()
+
 	    client, err := rpc.Dial("tcp", server.Addr)
 	    if err != nil {
 		return
@@ -140,6 +163,36 @@ func Heartbeat() {
 		BecomeFollower(reply.Term)
 		return
 	    }
+	    if state != LEADER || term != currentterm {
+		return
+	    }
+	    if !reply.Success {
+		server_nextidx[server.Id] = nextidx - 1
+		return
+	    }
+	    server_nextidx[server.Id] = len(args.Entries) + nextidx
+	    server_matchidx[server.Id] = server_nextidx[server.Id] - 1
+
+	    current_commit := commitidx
+	    for comm_i := commitidx + 1; comm_i < len(logs); comm_i++ {
+		if logs[comm_i].Term != term {
+		    continue
+		}
+		nreplicas := 1
+		for _, server := range cluster {
+		    if server_matchidx[server.Id] >= comm_i {
+			nreplicas++
+		    }
+		    if nreplicas > (len(cluster) + 1) / 2 {
+			commitidx = comm_i
+			break
+		    }
+		}
+	    }
+	    if current_commit != commitidx {
+		// callback to notify the application that new entries have been committed
+		// lock must be held
+	    }
 	}(server)
     }
 }
@@ -147,6 +200,11 @@ func Heartbeat() {
 func BecomeLeader() {
     state = LEADER
     DebugMsg("Became leader")
+
+    for _, server := range cluster {
+	server_nextidx[server.Id] = len(logs)
+	server_matchidx[server.Id] = -1
+    }
 
     go func() {
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -292,6 +350,10 @@ type RaftRPC struct {}
 type AppendEntriesRequest struct {
     Term int
     LeaderId int
+    PrevLogTerm int
+    PrevLogIndex int
+    LeaderCommit int
+    Entries []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -318,8 +380,36 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 	    // this term.
 	    BecomeFollower(args.Term)
 	}
-	reply.Success = true
 	lastiteraction = time.Now()
+
+	if args.PrevLogIndex == -1 ||
+	    (args.PrevLogIndex < len(logs) && logs[args.PrevLogIndex].Term == args.PrevLogTerm) {
+	    // append entries to log
+	    reply.Success = true
+
+	    insertidx := args.PrevLogIndex + 1
+	    newidx := 0
+	    for {
+		if insertidx >= len(logs) || newidx >= len(args.Entries) {
+		    break
+		}
+		if logs[insertidx].Term != args.Entries[newidx].Term {
+		    break
+		}
+		insertidx++
+		newidx++
+	    }
+	    if newidx < len(args.Entries) {
+		// append new entries
+		logs = append(logs[:insertidx], args.Entries[newidx:]...)
+	    }
+	    if args.LeaderCommit > commitidx {
+		// commit new entries
+		commitidx = min(args.LeaderCommit, len(logs) - 1)
+		// callback to notify the application that new entries have been committed
+	    }
+	    DebugMsg("AppendEntries succeeded")
+	}
     }
     reply.Term = term
 
