@@ -33,6 +33,9 @@ var directory string = "."
 // cluster of servers
 var cluster []string
 
+// channel to receive enrtries that can be applied
+var ClientChan chan string
+
 // Parse options given by the user
 //
 // Parameters:
@@ -162,6 +165,15 @@ func ParseMessage(conn net.Conn, msg string) {
 	data = strings.TrimSuffix(data, "\r\n")
 	value := []byte(data)
 
+	success := raft.CreateLogEntry(msg)
+	if !success {
+	    conn.Write([]byte("error: i am not the leader\r\n"))
+	    return
+	}
+
+	response := <- ClientChan
+	fmt.Println("Received from RAFT: ", response)
+
 	stat := database.Insert(key, value)
 	reply, refused := _RequestRefused(stat)
 	if !refused {
@@ -272,7 +284,8 @@ func Start() {
     if loglevel == "DEBUG" {
 	debug = true
     }
-    raft.Start(ipaddr, cluster, debug)
+    ClientChan = make(chan string)
+    raft.Start(ipaddr, cluster, ClientChan, debug)
 
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 
@@ -282,6 +295,7 @@ func Start() {
     go func() {
 	<-sigs
 	raft.Stop()
+	close(ClientChan)
 	segment.FlushCache()
 	os.Exit(0)
     }()

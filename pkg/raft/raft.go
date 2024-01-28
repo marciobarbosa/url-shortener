@@ -37,6 +37,7 @@ type Server struct {
 
 type LogEntry struct {
     Term int
+    Command string
 }
 
 var term int			// current term number
@@ -50,9 +51,13 @@ var cluster map[int]Server	// servers in the cluster
 var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
 
+var lastapplied int		// index of highest log entry applied to state machine
+var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
+var ClientChan chan<- string	// channel to notify the application that new entries can be applied
+
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string, debug bool) error {
+func Start(ipaddr string, servers []string, cli_chan chan<- string, debug bool) error {
     var err error
 
     term = 0
@@ -64,6 +69,10 @@ func Start(ipaddr string, servers []string, debug bool) error {
     cluster = make(map[int]Server)
     server_nextidx = make(map[int]int)
     server_matchidx = make(map[int]int)
+
+    lastapplied = -1
+    ClientChan = cli_chan
+    CommitChan = make(chan struct{}, 16)
 
     if (debug) {
 	trace = true
@@ -94,8 +103,20 @@ func Start(ipaddr string, servers []string, debug bool) error {
     }
     go rpc.Accept(listener)
     go ElectionTimer()
+    go ApplyLogEntries()
 
     return nil
+}
+
+func CreateLogEntry(command string) bool {
+    mutex.Lock()
+    defer mutex.Unlock()
+
+    if state == LEADER {
+	logs = append(logs, LogEntry{Term: term, Command: command})
+	return true
+    }
+    return false
 }
 
 func Stop() {
@@ -105,6 +126,7 @@ func Stop() {
     }
     shutdown = true
     listener.Close()
+    close(CommitChan)
 }
 
 func BecomeFollower(newterm int) {
@@ -190,8 +212,8 @@ func Heartbeat() {
 		}
 	    }
 	    if current_commit != commitidx {
-		// callback to notify the application that new entries have been committed
-		// lock must be held
+		// notify the application that new entries have been committed
+		CommitChan <- struct{}{}
 	    }
 	}(server)
     }
@@ -229,6 +251,13 @@ func BecomeLeader() {
     }()
 }
 
+func _GetLogState() (int, int) {
+    if len(logs) == 0 {
+	return -1, -1
+    }
+    return len(logs) - 1, logs[len(logs) - 1].Term
+}
+
 func StartElection() {
     term++
     state = CANDIDATE
@@ -243,6 +272,13 @@ func StartElection() {
 	go func(server Server) {
 	    var reply VoteReply
 	    args := &VoteRequest{ Term: currentterm, CandidateId: servid }
+
+	    mutex.Lock()
+	    lastlogidx, lastlogterm := _GetLogState()
+	    mutex.Unlock()
+
+	    args.LastLogIndex = lastlogidx
+	    args.LastLogTerm = lastlogterm
 
 	    if !server.Up {
 		return
@@ -343,6 +379,25 @@ func ElectionTimer() {
     }
 }
 
+func ApplyLogEntries() {
+    for range CommitChan {
+	var entries []LogEntry
+
+	mutex.Lock()
+	last_applied := lastapplied
+	if commitidx > lastapplied {
+	    entries = logs[last_applied + 1 : commitidx + 1]
+	    lastapplied = commitidx
+	}
+	mutex.Unlock()
+
+	for _, entry := range entries {
+	    ClientChan <- entry.Command
+	}
+    }
+    DebugMsg("ApplyLogEntries stopped")
+}
+
 // Remote Procedure Calls
 
 type RaftRPC struct {}
@@ -406,7 +461,8 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 	    if args.LeaderCommit > commitidx {
 		// commit new entries
 		commitidx = min(args.LeaderCommit, len(logs) - 1)
-		// callback to notify the application that new entries have been committed
+		// notify the application that new entries have been committed
+		CommitChan <- struct{}{}
 	    }
 	    DebugMsg("AppendEntries succeeded")
 	}
@@ -417,13 +473,27 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 }
 
 type VoteRequest struct {
-    Term int
-    CandidateId int
+    Term         int
+    CandidateId  int
+    LastLogIndex int
+    LastLogTerm  int
 }
 
 type VoteReply struct {
-    Term int
+    Term        int
     VoteGranted bool
+}
+
+func _CandidateLogOK(args *VoteRequest) bool {
+    lastlogidx, lastlogterm := _GetLogState()
+
+    if args.LastLogTerm > lastlogterm {
+	return true
+    }
+    if args.LastLogTerm == lastlogterm && args.LastLogIndex >= lastlogidx {
+	return true
+    }
+    return false
 }
 
 func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
@@ -439,7 +509,8 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
 	DebugMsg("RequestVote: better term from " + cluster[args.CandidateId].Addr)
 	BecomeFollower(args.Term)
     }
-    if args.Term == term && (votedfor == -1 || votedfor == args.CandidateId) {
+    if args.Term == term &&
+	(votedfor == -1 || votedfor == args.CandidateId) && _CandidateLogOK(args) {
 	votedfor = args.CandidateId
 	reply.VoteGranted = true
 	lastiteraction = time.Now()
