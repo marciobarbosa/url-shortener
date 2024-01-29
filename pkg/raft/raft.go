@@ -180,7 +180,7 @@ func Heartbeat() {
 	    args.LeaderCommit = commitidx
 	    args.Entries = logs[nextidx:]
 
-	    PrintLog(server.Addr, args.Entries)
+	    //PrintLog(server.Addr, args.Entries)
 	    mutex.Unlock()
 
 	    client, err := rpc.Dial("tcp", server.Addr)
@@ -424,14 +424,11 @@ func ApplyLogEntriesFollower() {
     if shutdown {
 	return
     }
-    mutex.Lock()
     last_applied := lastapplied
     if commitidx > lastapplied {
 	entries = logs[last_applied + 1 : commitidx + 1]
 	lastapplied = commitidx
     }
-    mutex.Unlock()
-
     for _, entry := range entries {
 	ApplyChangesCB(entry.Command)
     }
@@ -493,7 +490,7 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 		insertidx++
 		newidx++
 	    }
-	    PrintLog(cluster[args.LeaderId].Addr, args.Entries[newidx:])
+	    //PrintLog(cluster[args.LeaderId].Addr, args.Entries[newidx:])
 
 	    if newidx < len(args.Entries) {
 		// append new entries

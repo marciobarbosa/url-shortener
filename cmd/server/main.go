@@ -205,19 +205,18 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte("error: missing arguments\r\n"))
 	    return
 	}
-	key := []byte(tokens[1])
-	data := msg[4 + len(tokens[1]) + 1:]
-	data = strings.TrimSuffix(data, "\r\n")
-	value := []byte(data)
-
 	success := raft.CreateLogEntry(msg)
 	if !success {
 	    conn.Write([]byte("error: i am not the leader\r\n"))
 	    return
 	}
-
 	response := <- ClientChan
 	fmt.Println("Received from RAFT: ", response)
+
+	key := []byte(tokens[1])
+	data := msg[4 + len(tokens[1]) + 1:]
+	data = strings.TrimSuffix(data, "\r\n")
+	value := []byte(data)
 
 	stat := database.Insert(key, value)
 	reply, refused := _RequestRefused(stat)
@@ -256,6 +255,14 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte("error missing arguments\r\n"))
 	    return
 	}
+	success := raft.CreateLogEntry(msg)
+	if !success {
+	    conn.Write([]byte("error: i am not the leader\r\n"))
+	    return
+	}
+	response := <- ClientChan
+	fmt.Println("Received from RAFT: ", response)
+
 	key := []byte(tokens[1])
 	data, stat := database.Remove(key)
 	reply, refused := _RequestRefused(stat)
