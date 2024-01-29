@@ -140,6 +140,51 @@ func _RequestRefused(stat database.Status) (string, bool) {
     return message, refused
 }
 
+func ApplyEntriesCB(command string) {
+    tokens := strings.Fields(command)
+    cmd := tokens[0]
+
+    switch cmd {
+    case "put":
+	key := []byte(tokens[1])
+	data := command[4 + len(tokens[1]) + 1:]
+	data = strings.TrimSuffix(data, "\r\n")
+	value := []byte(data)
+
+	stat := database.Insert(key, value)
+	reply, refused := _RequestRefused(stat)
+	if !refused {
+	    switch stat {
+	    case database.CREATED:
+		reply = "put_success " + tokens[1] + "\r\n"
+		fmt.Println("Reply: ", reply)
+	    case database.UPDATED:
+		reply = "put_update " + tokens[1] + "\r\n"
+		fmt.Println("Reply: ", reply)
+	    default:
+		reply = "put_error\r\n"
+		fmt.Println("Reply: ", reply)
+	    }
+	}
+    case "delete":
+	key := []byte(tokens[1])
+	data, stat := database.Remove(key)
+	reply, refused := _RequestRefused(stat)
+	if !refused {
+	    switch stat {
+	    case database.DELETED:
+		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
+		fmt.Println("Reply: ", reply)
+	    default:
+		reply = "delete_error " + tokens[1] + "\r\n"
+		fmt.Println("Reply: ", reply)
+	    }
+	}
+    default:
+	fmt.Println("error command not supported")
+    }
+}
+
 // Parse and execute request: put, get, and delete.
 //
 // Parameters:
@@ -285,7 +330,7 @@ func Start() {
 	debug = true
     }
     ClientChan = make(chan string)
-    raft.Start(ipaddr, cluster, ClientChan, debug)
+    raft.Start(ipaddr, cluster, ClientChan, ApplyEntriesCB, debug)
 
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 

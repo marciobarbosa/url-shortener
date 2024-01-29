@@ -54,10 +54,11 @@ var server_matchidx map[int]int	// highest log index known to be replicated on e
 var lastapplied int		// index of highest log entry applied to state machine
 var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
 var ClientChan chan<- string	// channel to notify the application that new entries can be applied
+var ApplyChangesCB func(string)	// callback to apply changes to the state machine
 
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string, cli_chan chan<- string, debug bool) error {
+func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(string), debug bool) error {
     var err error
 
     term = 0
@@ -71,6 +72,7 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, debug bool) 
     server_matchidx = make(map[int]int)
 
     lastapplied = -1
+    ApplyChangesCB = cb
     ClientChan = cli_chan
     CommitChan = make(chan struct{}, 16)
 
@@ -120,13 +122,14 @@ func CreateLogEntry(command string) bool {
 }
 
 func Stop() {
+    shutdown = true
+    close(CommitChan)
+
     if (trace) {
 	trace_file.Close()
 	trace = false
     }
-    shutdown = true
     listener.Close()
-    close(CommitChan)
 }
 
 func BecomeFollower(newterm int) {
@@ -136,6 +139,18 @@ func BecomeFollower(newterm int) {
     lastiteraction = time.Now()
     DebugMsg("Became follower")
     go ElectionTimer()
+}
+
+func PrintLog(ip string, slogs []LogEntry) {
+    if len(slogs) == 0 {
+	return
+    }
+    fmt.Println("Sending entries to " + ip + ":")
+
+    for _, entry := range slogs {
+	fmt.Printf("%d: %s\n", entry.Term, entry.Command)
+    }
+    fmt.Println()
 }
 
 func Heartbeat() {
@@ -164,6 +179,8 @@ func Heartbeat() {
 	    args.PrevLogIndex = prevlogidx
 	    args.LeaderCommit = commitidx
 	    args.Entries = logs[nextidx:]
+
+	    PrintLog(server.Addr, args.Entries)
 	    mutex.Unlock()
 
 	    client, err := rpc.Dial("tcp", server.Addr)
@@ -383,6 +400,9 @@ func ApplyLogEntries() {
     for range CommitChan {
 	var entries []LogEntry
 
+	if shutdown {
+	    break
+	}
 	mutex.Lock()
 	last_applied := lastapplied
 	if commitidx > lastapplied {
@@ -396,6 +416,25 @@ func ApplyLogEntries() {
 	}
     }
     DebugMsg("ApplyLogEntries stopped")
+}
+
+func ApplyLogEntriesFollower() {
+    var entries []LogEntry
+
+    if shutdown {
+	return
+    }
+    mutex.Lock()
+    last_applied := lastapplied
+    if commitidx > lastapplied {
+	entries = logs[last_applied + 1 : commitidx + 1]
+	lastapplied = commitidx
+    }
+    mutex.Unlock()
+
+    for _, entry := range entries {
+	ApplyChangesCB(entry.Command)
+    }
 }
 
 // Remote Procedure Calls
@@ -454,6 +493,8 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 		insertidx++
 		newidx++
 	    }
+	    PrintLog(cluster[args.LeaderId].Addr, args.Entries[newidx:])
+
 	    if newidx < len(args.Entries) {
 		// append new entries
 		logs = append(logs[:insertidx], args.Entries[newidx:]...)
@@ -462,9 +503,10 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 		// commit new entries
 		commitidx = min(args.LeaderCommit, len(logs) - 1)
 		// notify the application that new entries have been committed
-		CommitChan <- struct{}{}
+		ApplyLogEntriesFollower()
+		//CommitChan <- struct{}{}
 	    }
-	    DebugMsg("AppendEntries succeeded")
+	    //DebugMsg("AppendEntries succeeded")
 	}
     }
     reply.Term = term
