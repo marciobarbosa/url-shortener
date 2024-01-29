@@ -6,8 +6,12 @@ import (
     "net"
     "sync"
     "time"
+    "bytes"
     "net/rpc"
     "math/rand"
+    "path/filepath"
+    "encoding/binary"
+    "github.com/marciobarbosa/url-shortener/pkg/raftdb"
 )
 
 const port = "8082"
@@ -47,6 +51,8 @@ var commitidx int		// index of highest log entry known to be committed
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 
 var logs []LogEntry		// log entries
+var logs_len int		// number of log entries
+
 var cluster map[int]Server	// servers in the cluster
 var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
@@ -58,10 +64,12 @@ var ApplyChangesCB func(string)	// callback to apply changes to the state machin
 
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(string), debug bool) error {
+func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(string), dir string, debug bool) error {
     var err error
+    var params raftdb.InitParams
 
     term = 0
+    logs_len = 0
     votedfor = -1
     commitidx = -1
     state = FOLLOWER
@@ -85,6 +93,16 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
 	}
     }
 
+    parentdir := filepath.Dir(dir)
+    params.Policy = raftdb.LFU
+    params.CacheSize = 2048
+    params.BasePath = parentdir + "/raft/"
+
+    err = raftdb.Init(params)
+    if err != nil {
+	return err
+    }
+
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
 
@@ -103,6 +121,7 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
 	svr := Server{Id: index, Addr: addr, Up: true}
 	cluster[index] = svr
     }
+
     go rpc.Accept(listener)
     go ElectionTimer()
     go ApplyLogEntries()
@@ -124,6 +143,7 @@ func CreateLogEntry(command string) bool {
 func Stop() {
     shutdown = true
     close(CommitChan)
+    raftdb.Shutdown()
 
     if (trace) {
 	trace_file.Close()
@@ -557,4 +577,245 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
     reply.Term = term
 
     return nil
+}
+
+// Raft Database
+
+func SetTerm(current_term int) {
+    key := []byte("term")
+    value := make([]byte, 4)
+
+    binary.LittleEndian.PutUint32(value, uint32(current_term))
+    status := raftdb.Insert(key, value)
+    if status != raftdb.CREATED && status != raftdb.UPDATED {
+	fmt.Printf("Error inserting term: %d\n", status)
+	return
+    }
+}
+
+func GetTerm() (int, error) {
+    key := []byte("term")
+
+    value, status := raftdb.Request(key)
+    if status != raftdb.FOUND {
+	return -1, fmt.Errorf("Term not found")
+    }
+    return int(binary.LittleEndian.Uint32(value)), nil
+}
+
+func SetVotedFor(voted_for int) {
+    key := []byte("votedfor")
+    value := make([]byte, 4)
+
+    binary.LittleEndian.PutUint32(value, uint32(voted_for))
+    status := raftdb.Insert(key, value)
+    if status != raftdb.CREATED && status != raftdb.UPDATED {
+	fmt.Printf("Error inserting votedfor: %d\n", status)
+	return
+    }
+}
+
+func GetVotedFor() (int, error) {
+    key := []byte("votedfor")
+
+    value, status := raftdb.Request(key)
+    if status != raftdb.FOUND {
+	return -1, fmt.Errorf("VotedFor not found")
+    }
+    return int(binary.LittleEndian.Uint32(value)), nil
+}
+
+func LogAppend(term int, command string) {
+    key := make([]byte, 4)
+    value := new(bytes.Buffer)
+
+    binary.LittleEndian.PutUint32(key, uint32(logs_len))
+
+    err := binary.Write(value, binary.LittleEndian, uint32(term))
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+
+    _, err = value.WriteString(command)
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+
+    status := raftdb.Insert(key, value.Bytes())
+    if status != raftdb.CREATED && status != raftdb.UPDATED {
+	fmt.Printf("Error inserting log entry: %d\n", status)
+	return
+    }
+    logs_len++
+}
+
+func LogGet(index int) (LogEntry, error) {
+    var term32 uint32
+    var entry LogEntry
+
+    key := make([]byte, 4)
+    binary.LittleEndian.PutUint32(key, uint32(index))
+
+    value, status := raftdb.Request(key)
+    if status != raftdb.FOUND {
+	return entry, fmt.Errorf("Log entry not found")
+    }
+
+    buf := bytes.NewBuffer(value)
+    err := binary.Read(buf, binary.LittleEndian, &term32)
+    if err != nil {
+	return entry, err
+    }
+
+    entry.Term = int(term32)
+    entry.Command = string(buf.Bytes())
+
+    return entry, nil
+}
+
+func LogGetSize() int {
+    var count int
+    key := make([]byte, 4)
+
+    for count = 0; ; count++ {
+	binary.LittleEndian.PutUint32(key, uint32(count))
+	_, status := raftdb.Request(key)
+	if status != raftdb.FOUND {
+	    break
+	}
+    }
+    return count
+}
+
+func LogGetRange(start int, end int) ([]LogEntry, error) {
+    var entries []LogEntry
+
+    for i := start; i <= end; i++ {
+	entry, err := LogGet(i)
+	if err != nil {
+	    return entries, err
+	}
+	entries = append(entries, entry)
+    }
+    return entries, nil
+}
+
+func _RemoveLeftovers(offset int) error {
+    if logs_len <= offset {
+	return nil
+    }
+    for i := offset; i < logs_len; i++ {
+	key := make([]byte, 4)
+	binary.LittleEndian.PutUint32(key, uint32(i))
+
+	_, status := raftdb.Remove(key)
+	if status != raftdb.DELETED {
+	    return fmt.Errorf("Error removing log entry")
+	}
+	logs_len--
+    }
+    return nil
+}
+
+func LogReWrite(from int, entries []LogEntry) error {
+    if len(entries) == 0 {
+	return nil
+    }
+
+    err := _RemoveLeftovers(from + len(entries))
+    if err != nil {
+	return err
+    }
+    logs_len -= len(entries)
+    for _, entry := range entries {
+	LogAppend(entry.Term, entry.Command)
+    }
+    return nil
+}
+
+// Tests
+
+func test() {
+    var params raftdb.InitParams
+
+    params.Policy = raftdb.LFU
+    params.CacheSize = 2048
+    params.BasePath = "/tmp/raft/"
+
+    err := raftdb.Init(params)
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+
+    for i := 0; i < 10; i++ {
+	LogAppend(i, fmt.Sprintf("command %d", i))
+    }
+
+    fmt.Println("All log entries:")
+    for i := 0; i < 10; i++ {
+	entry, err := LogGet(i)
+	if err != nil {
+	    fmt.Println(err)
+	    continue
+	}
+	fmt.Printf("%d: %s\n", entry.Term, entry.Command)
+    }
+
+    fmt.Println()
+    fmt.Println("Log entries 1 to 4:")
+
+    entries, err := LogGetRange(1, 4)
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+    for _, entry := range entries {
+	fmt.Printf("%d: %s\n", entry.Term, entry.Command)
+    }
+
+    fmt.Println()
+    fmt.Println("Rewriting log entries 5 to 8:")
+    err = LogReWrite(5, entries)
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+
+    fmt.Println()
+    fmt.Println("Result:")
+    for i := 0; i < logs_len; i++ {
+	entry, err := LogGet(i)
+	if err != nil {
+	    fmt.Println(err)
+	    continue
+	}
+	fmt.Printf("%d: %s\n", entry.Term, entry.Command)
+    }
+    fmt.Printf("Final length: %d\n", logs_len)
+
+    fmt.Println()
+    fmt.Println("Writing term (10) and votedfor (5):")
+    SetTerm(10)
+    SetVotedFor(5)
+
+    test_term, err := GetTerm()
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+    test_votedfor, err := GetVotedFor()
+    if err != nil {
+	fmt.Println(err)
+	return
+    }
+    fmt.Printf("Term: %d, VotedFor: %d\n", test_term, test_votedfor)
+
+    fmt.Println()
+    fmt.Println("Counting log entries:")
+    fmt.Printf("Log size: %d\n", LogGetSize())
+
+    raftdb.Shutdown()
 }
