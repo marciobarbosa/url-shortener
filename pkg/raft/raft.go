@@ -44,13 +44,10 @@ type LogEntry struct {
     Command string
 }
 
-var term int			// current term number
 var state int			// current state
-var votedfor int		// candidate id we voted for
 var commitidx int		// index of highest log entry known to be committed
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 
-var logs []LogEntry		// log entries
 var logs_len int		// number of log entries
 
 var cluster map[int]Server	// servers in the cluster
@@ -68,9 +65,6 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     var err error
     var params raftdb.InitParams
 
-    term = 0
-    logs_len = 0
-    votedfor = -1
     commitidx = -1
     state = FOLLOWER
     lastiteraction = time.Now()
@@ -102,6 +96,9 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     if err != nil {
 	return err
     }
+    logs_len = LogGetSize()
+    SetTerm(0)
+    SetVotedFor(-1)
 
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
@@ -134,7 +131,11 @@ func CreateLogEntry(command string) bool {
     defer mutex.Unlock()
 
     if state == LEADER {
-	logs = append(logs, LogEntry{Term: term, Command: command})
+	term, err := GetTerm()
+	if err != nil {
+	    panic(err)
+	}
+	LogAppend(term, command)
 	return true
     }
     return false
@@ -154,8 +155,8 @@ func Stop() {
 
 func BecomeFollower(newterm int) {
     state = FOLLOWER
-    term = newterm
-    votedfor = -1
+    SetTerm(newterm)
+    SetVotedFor(-1)
     lastiteraction = time.Now()
     DebugMsg("Became follower")
     go ElectionTimer()
@@ -179,12 +180,16 @@ func Heartbeat() {
 	mutex.Unlock()
 	return
     }
-    currentterm := term
+    currentterm, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
     mutex.Unlock()
 
     for _, server := range cluster {
 	args := &AppendEntriesRequest{ Term: currentterm, LeaderId: servid }
 	go func(server Server) {
+	    var err error
 	    var reply AppendEntriesReply
 
 	    mutex.Lock()
@@ -193,12 +198,19 @@ func Heartbeat() {
 
 	    prevlogterm := -1
 	    if prevlogidx >= 0 {
-		prevlogterm = logs[prevlogidx].Term
+		entry, err := LogGet(prevlogidx)
+		if err != nil {
+		    panic(err)
+		}
+		prevlogterm = entry.Term
 	    }
 	    args.PrevLogTerm = prevlogterm
 	    args.PrevLogIndex = prevlogidx
 	    args.LeaderCommit = commitidx
-	    args.Entries = logs[nextidx:]
+	    args.Entries, err = LogGetRange(nextidx, logs_len - 1)
+	    if err != nil {
+		panic(err)
+	    }
 
 	    //PrintLog(server.Addr, args.Entries)
 	    mutex.Unlock()
@@ -222,6 +234,11 @@ func Heartbeat() {
 		BecomeFollower(reply.Term)
 		return
 	    }
+
+	    term, err := GetTerm()
+	    if err != nil {
+		panic(err)
+	    }
 	    if state != LEADER || term != currentterm {
 		return
 	    }
@@ -233,8 +250,12 @@ func Heartbeat() {
 	    server_matchidx[server.Id] = server_nextidx[server.Id] - 1
 
 	    current_commit := commitidx
-	    for comm_i := commitidx + 1; comm_i < len(logs); comm_i++ {
-		if logs[comm_i].Term != term {
+	    for comm_i := commitidx + 1; comm_i < logs_len; comm_i++ {
+		entry, err := LogGet(comm_i)
+		if err != nil {
+		    panic(err)
+		}
+		if entry.Term != term {
 		    continue
 		}
 		nreplicas := 1
@@ -261,7 +282,7 @@ func BecomeLeader() {
     DebugMsg("Became leader")
 
     for _, server := range cluster {
-	server_nextidx[server.Id] = len(logs)
+	server_nextidx[server.Id] = logs_len
 	server_matchidx[server.Id] = -1
     }
 
@@ -289,16 +310,25 @@ func BecomeLeader() {
 }
 
 func _GetLogState() (int, int) {
-    if len(logs) == 0 {
+    if logs_len == 0 {
 	return -1, -1
     }
-    return len(logs) - 1, logs[len(logs) - 1].Term
+    entry, err := LogGet(logs_len - 1)
+    if err != nil {
+	panic(err)
+    }
+    return logs_len - 1, entry.Term
 }
 
 func StartElection() {
+    term, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
     term++
+    SetTerm(term)
     state = CANDIDATE
-    votedfor = servid
+    SetVotedFor(servid)
     lastiteraction = time.Now()
 
     DebugMsg("Starting election")
@@ -343,6 +373,11 @@ func StartElection() {
 		DebugMsg("Election canceled")
 		return
 	    }
+
+	    term, err := GetTerm()
+	    if err != nil {
+		panic(err)
+	    }
 	    if reply.Term > term {
 		// another candidate won the election while we were requesting
 		// votes.
@@ -368,6 +403,14 @@ func DebugMsg(msg string) {
     if !trace {
 	return
     }
+    term, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
+    votedfor, err := GetVotedFor()
+    if err != nil {
+	panic(err)
+    }
     prefix := time.Now().Format("2006-01-02 15:04:05")
     suffix := fmt.Sprintf(" (term: %v, state: %v, votedfor: %v, servaddr: %v)", term, state, votedfor, servaddr)
     trace_file.WriteString(prefix + ": " + msg + suffix + "\n")
@@ -383,6 +426,10 @@ func ElectionTimer() {
     timeout := time.Duration(150 + rand.Intn(150)) * time.Millisecond
 
     mutex.Lock()
+    term, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
     currentterm := term
     DebugMsg("Election timer started: " + timeout.String())
     mutex.Unlock()
@@ -397,6 +444,10 @@ func ElectionTimer() {
 	<-ticker.C
 
 	mutex.Lock()
+	term, err := GetTerm()
+	if err != nil {
+	    panic(err)
+	}
 	if (state != CANDIDATE && state != FOLLOWER) || term != currentterm {
 	    // received enough votes from previous vote requests or found
 	    // another peer with a better term (follower gets a request for vote
@@ -418,6 +469,7 @@ func ElectionTimer() {
 
 func ApplyLogEntries() {
     for range CommitChan {
+	var err error
 	var entries []LogEntry
 
 	if shutdown {
@@ -426,7 +478,10 @@ func ApplyLogEntries() {
 	mutex.Lock()
 	last_applied := lastapplied
 	if commitidx > lastapplied {
-	    entries = logs[last_applied + 1 : commitidx + 1]
+	    entries, err = LogGetRange(last_applied + 1, commitidx)
+	    if err != nil {
+		panic(err)
+	    }
 	    lastapplied = commitidx
 	}
 	mutex.Unlock()
@@ -439,6 +494,7 @@ func ApplyLogEntries() {
 }
 
 func ApplyLogEntriesFollower() {
+    var err error
     var entries []LogEntry
 
     if shutdown {
@@ -446,7 +502,10 @@ func ApplyLogEntriesFollower() {
     }
     last_applied := lastapplied
     if commitidx > lastapplied {
-	entries = logs[last_applied + 1 : commitidx + 1]
+	entries, err = LogGetRange(last_applied + 1, commitidx)
+	if err != nil {
+	    panic(err)
+	}
 	lastapplied = commitidx
     }
     for _, entry := range entries {
@@ -481,6 +540,10 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
     }
     reply.Success = false
 
+    term, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
     if args.Term > term {
 	DebugMsg("AppendEntries: better term from " + cluster[args.LeaderId].Addr)
 	BecomeFollower(args.Term)
@@ -493,18 +556,26 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 	}
 	lastiteraction = time.Now()
 
+	entry, err := LogGet(args.PrevLogIndex)
+	if err != nil {
+	    panic(err)
+	}
 	if args.PrevLogIndex == -1 ||
-	    (args.PrevLogIndex < len(logs) && logs[args.PrevLogIndex].Term == args.PrevLogTerm) {
+	    (args.PrevLogIndex < logs_len && entry.Term == args.PrevLogTerm) {
 	    // append entries to log
 	    reply.Success = true
 
 	    insertidx := args.PrevLogIndex + 1
 	    newidx := 0
 	    for {
-		if insertidx >= len(logs) || newidx >= len(args.Entries) {
+		if insertidx >= logs_len || newidx >= len(args.Entries) {
 		    break
 		}
-		if logs[insertidx].Term != args.Entries[newidx].Term {
+		entry, err := LogGet(insertidx)
+		if err != nil {
+		    panic(err)
+		}
+		if entry.Term != args.Entries[newidx].Term {
 		    break
 		}
 		insertidx++
@@ -514,11 +585,14 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 
 	    if newidx < len(args.Entries) {
 		// append new entries
-		logs = append(logs[:insertidx], args.Entries[newidx:]...)
+		err := LogReWrite(insertidx, args.Entries[newidx:])
+		if err != nil {
+		    panic(err)
+		}
 	    }
 	    if args.LeaderCommit > commitidx {
 		// commit new entries
-		commitidx = min(args.LeaderCommit, len(logs) - 1)
+		commitidx = min(args.LeaderCommit, logs_len - 1)
 		// notify the application that new entries have been committed
 		ApplyLogEntriesFollower()
 		//CommitChan <- struct{}{}
@@ -564,13 +638,21 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
     }
     reply.VoteGranted = false
 
+    term, err := GetTerm()
+    if err != nil {
+	panic(err)
+    }
     if args.Term > term {
 	DebugMsg("RequestVote: better term from " + cluster[args.CandidateId].Addr)
 	BecomeFollower(args.Term)
     }
+    votedfor, err := GetVotedFor()
+    if err != nil {
+	panic(err)
+    }
     if args.Term == term &&
 	(votedfor == -1 || votedfor == args.CandidateId) && _CandidateLogOK(args) {
-	votedfor = args.CandidateId
+	SetVotedFor(args.CandidateId)
 	reply.VoteGranted = true
 	lastiteraction = time.Now()
     }
