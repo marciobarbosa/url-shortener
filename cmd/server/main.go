@@ -205,13 +205,13 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte("error: missing arguments\r\n"))
 	    return
 	}
-//	success := raft.CreateLogEntry(msg)
-//	if !success {
-//	    conn.Write([]byte("error: i am not the leader\r\n"))
-//	    return
-//	}
-//	response := <- ClientChan
-//	fmt.Println("Received from RAFT: ", response)
+	success := raft.CreateLogEntry(msg)
+	if !success {
+	    conn.Write([]byte("error: i am not the leader\r\n"))
+	    return
+	}
+	response := <- ClientChan
+	fmt.Println("Received from RAFT: ", response)
 
 	key := []byte(tokens[1])
 	data := msg[4 + len(tokens[1]) + 1:]

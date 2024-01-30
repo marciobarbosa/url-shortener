@@ -19,7 +19,7 @@ const retryinterval = 5 * time.Second
 const timeout = 2 * time.Second
 
 var servaddr string
-var servid int
+var servid int32
 
 var listener net.Listener
 var shutdown bool = false
@@ -40,21 +40,21 @@ type Server struct {
 }
 
 type LogEntry struct {
-    Term int
+    Term int32
     Command string
 }
 
 var state int			// current state
-var commitidx int		// index of highest log entry known to be committed
+var commitidx int32		// index of highest log entry known to be committed
 var lastiteraction time.Time	// last time we heard from leader or voted for a candidate
 
-var logs_len int		// number of log entries
+var logs_len int32		// number of log entries
 
 var cluster map[int]Server	// servers in the cluster
 var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
 
-var lastapplied int		// index of highest log entry applied to state machine
+var lastapplied int32		// index of highest log entry applied to state machine
 var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
 var ClientChan chan<- string	// channel to notify the application that new entries can be applied
 var ApplyChangesCB func(string)	// callback to apply changes to the state machine
@@ -111,7 +111,7 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     for index, server := range servers {
 	if server == ipaddr {
 	    servaddr = server
-	    servid = index
+	    servid = int32(index)
 	    continue
 	}
 	addr := server + ":" + port
@@ -153,7 +153,7 @@ func Stop() {
     listener.Close()
 }
 
-func BecomeFollower(newterm int) {
+func BecomeFollower(newterm int32) {
     state = FOLLOWER
     SetTerm(newterm)
     SetVotedFor(-1)
@@ -194,9 +194,9 @@ func Heartbeat() {
 
 	    mutex.Lock()
 	    nextidx := server_nextidx[server.Id]
-	    prevlogidx := nextidx - 1
+	    prevlogidx := int32(nextidx - 1)
 
-	    prevlogterm := -1
+	    prevlogterm := int32(-1)
 	    if prevlogidx >= 0 {
 		entry, err := LogGet(prevlogidx)
 		if err != nil {
@@ -207,7 +207,7 @@ func Heartbeat() {
 	    args.PrevLogTerm = prevlogterm
 	    args.PrevLogIndex = prevlogidx
 	    args.LeaderCommit = commitidx
-	    args.Entries, err = LogGetRange(nextidx, logs_len - 1)
+	    args.Entries, err = LogGetRange(int32(nextidx), logs_len - 1)
 	    if err != nil {
 		panic(err)
 	    }
@@ -260,7 +260,7 @@ func Heartbeat() {
 		}
 		nreplicas := 1
 		for _, server := range cluster {
-		    if server_matchidx[server.Id] >= comm_i {
+		    if server_matchidx[server.Id] >= int(comm_i) {
 			nreplicas++
 		    }
 		    if nreplicas > (len(cluster) + 1) / 2 {
@@ -282,7 +282,7 @@ func BecomeLeader() {
     DebugMsg("Became leader")
 
     for _, server := range cluster {
-	server_nextidx[server.Id] = logs_len
+	server_nextidx[server.Id] = int(logs_len)
 	server_matchidx[server.Id] = -1
     }
 
@@ -309,7 +309,7 @@ func BecomeLeader() {
     }()
 }
 
-func _GetLogState() (int, int) {
+func _GetLogState() (int32, int32) {
     if logs_len == 0 {
 	return -1, -1
     }
@@ -328,7 +328,7 @@ func StartElection() {
     term++
     SetTerm(term)
     state = CANDIDATE
-    SetVotedFor(servid)
+    SetVotedFor(int32(servid))
     lastiteraction = time.Now()
 
     DebugMsg("Starting election")
@@ -518,16 +518,16 @@ func ApplyLogEntriesFollower() {
 type RaftRPC struct {}
 
 type AppendEntriesRequest struct {
-    Term int
-    LeaderId int
-    PrevLogTerm int
-    PrevLogIndex int
-    LeaderCommit int
+    Term int32
+    LeaderId int32
+    PrevLogTerm int32
+    PrevLogIndex int32
+    LeaderCommit int32
     Entries []LogEntry
 }
 
 type AppendEntriesReply struct {
-    Term int
+    Term int32
     Success bool
 }
 
@@ -545,7 +545,7 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 	panic(err)
     }
     if args.Term > term {
-	DebugMsg("AppendEntries: better term from " + cluster[args.LeaderId].Addr)
+	DebugMsg("AppendEntries: better term from " + cluster[int(args.LeaderId)].Addr)
 	BecomeFollower(args.Term)
     }
     if args.Term == term {
@@ -557,7 +557,7 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 	lastiteraction = time.Now()
 
 	entry, err := LogGet(args.PrevLogIndex)
-	if err != nil {
+	if err != nil && args.PrevLogIndex != -1 && args.PrevLogIndex < logs_len {
 	    panic(err)
 	}
 	if args.PrevLogIndex == -1 ||
@@ -606,14 +606,14 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 }
 
 type VoteRequest struct {
-    Term         int
-    CandidateId  int
-    LastLogIndex int
-    LastLogTerm  int
+    Term         int32
+    CandidateId  int32
+    LastLogIndex int32
+    LastLogTerm  int32
 }
 
 type VoteReply struct {
-    Term        int
+    Term        int32
     VoteGranted bool
 }
 
@@ -643,7 +643,7 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
 	panic(err)
     }
     if args.Term > term {
-	DebugMsg("RequestVote: better term from " + cluster[args.CandidateId].Addr)
+	DebugMsg("RequestVote: better term from " + cluster[int(args.CandidateId)].Addr)
 	BecomeFollower(args.Term)
     }
     votedfor, err := GetVotedFor()
@@ -651,8 +651,8 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
 	panic(err)
     }
     if args.Term == term &&
-	(votedfor == -1 || votedfor == args.CandidateId) && _CandidateLogOK(args) {
-	SetVotedFor(args.CandidateId)
+	(votedfor == -1 || votedfor == int32(args.CandidateId)) && _CandidateLogOK(args) {
+	SetVotedFor(int32(args.CandidateId))
 	reply.VoteGranted = true
 	lastiteraction = time.Now()
     }
@@ -663,7 +663,7 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
 
 // Raft Database
 
-func SetTerm(current_term int) {
+func SetTerm(current_term int32) {
     key := []byte("term")
     value := make([]byte, 4)
 
@@ -675,17 +675,17 @@ func SetTerm(current_term int) {
     }
 }
 
-func GetTerm() (int, error) {
+func GetTerm() (int32, error) {
     key := []byte("term")
 
     value, status := raftdb.Request(key)
     if status != raftdb.FOUND {
 	return -1, fmt.Errorf("Term not found")
     }
-    return int(binary.LittleEndian.Uint32(value)), nil
+    return int32(binary.LittleEndian.Uint32(value)), nil
 }
 
-func SetVotedFor(voted_for int) {
+func SetVotedFor(voted_for int32) {
     key := []byte("votedfor")
     value := make([]byte, 4)
 
@@ -697,17 +697,17 @@ func SetVotedFor(voted_for int) {
     }
 }
 
-func GetVotedFor() (int, error) {
+func GetVotedFor() (int32, error) {
     key := []byte("votedfor")
 
     value, status := raftdb.Request(key)
     if status != raftdb.FOUND {
 	return -1, fmt.Errorf("VotedFor not found")
     }
-    return int(binary.LittleEndian.Uint32(value)), nil
+    return int32(binary.LittleEndian.Uint32(value)), nil
 }
 
-func LogAppend(term int, command string) {
+func LogAppend(term int32, command string) {
     key := make([]byte, 4)
     value := new(bytes.Buffer)
 
@@ -733,7 +733,7 @@ func LogAppend(term int, command string) {
     logs_len++
 }
 
-func LogGet(index int) (LogEntry, error) {
+func LogGet(index int32) (LogEntry, error) {
     var term32 uint32
     var entry LogEntry
 
@@ -751,14 +751,14 @@ func LogGet(index int) (LogEntry, error) {
 	return entry, err
     }
 
-    entry.Term = int(term32)
+    entry.Term = int32(term32)
     entry.Command = string(buf.Bytes())
 
     return entry, nil
 }
 
-func LogGetSize() int {
-    var count int
+func LogGetSize() int32 {
+    var count int32
     key := make([]byte, 4)
 
     for count = 0; ; count++ {
@@ -771,7 +771,7 @@ func LogGetSize() int {
     return count
 }
 
-func LogGetRange(start int, end int) ([]LogEntry, error) {
+func LogGetRange(start int32, end int32) ([]LogEntry, error) {
     var entries []LogEntry
 
     for i := start; i <= end; i++ {
@@ -784,7 +784,7 @@ func LogGetRange(start int, end int) ([]LogEntry, error) {
     return entries, nil
 }
 
-func _RemoveLeftovers(offset int) error {
+func _RemoveLeftovers(offset int32) error {
     if logs_len <= offset {
 	return nil
     }
@@ -801,16 +801,19 @@ func _RemoveLeftovers(offset int) error {
     return nil
 }
 
-func LogReWrite(from int, entries []LogEntry) error {
+func LogReWrite(from int32, entries []LogEntry) error {
     if len(entries) == 0 {
 	return nil
     }
 
-    err := _RemoveLeftovers(from + len(entries))
+    err := _RemoveLeftovers(from + int32(len(entries)))
     if err != nil {
 	return err
     }
-    logs_len -= len(entries)
+    if from < logs_len {
+	delta := logs_len - from
+	logs_len -= delta
+    }
     for _, entry := range entries {
 	LogAppend(entry.Term, entry.Command)
     }
@@ -833,12 +836,12 @@ func test() {
     }
 
     for i := 0; i < 10; i++ {
-	LogAppend(i, fmt.Sprintf("command %d", i))
+	LogAppend(int32(i), fmt.Sprintf("command %d", i))
     }
 
     fmt.Println("All log entries:")
     for i := 0; i < 10; i++ {
-	entry, err := LogGet(i)
+	entry, err := LogGet(int32(i))
 	if err != nil {
 	    fmt.Println(err)
 	    continue
@@ -868,8 +871,8 @@ func test() {
 
     fmt.Println()
     fmt.Println("Result:")
-    for i := 0; i < logs_len; i++ {
-	entry, err := LogGet(i)
+    for i := 0; i < int(logs_len); i++ {
+	entry, err := LogGet(int32(i))
 	if err != nil {
 	    fmt.Println(err)
 	    continue
