@@ -147,7 +147,10 @@ func _RequestRefused(stat database.Status) (string, bool) {
     return message, refused
 }
 
-func ApplyEntriesCB(command string) {
+func ApplyEntriesCB(command string) (string, bool) {
+    var reply string = ""
+    var refused bool = true
+
     tokens := strings.Fields(command)
     cmd := tokens[0]
 
@@ -159,7 +162,7 @@ func ApplyEntriesCB(command string) {
 	value := []byte(data)
 
 	stat := database.Insert(key, value)
-	reply, refused := _RequestRefused(stat)
+	reply, refused = _RequestRefused(stat)
 	if !refused {
 	    switch stat {
 	    case database.CREATED:
@@ -174,7 +177,7 @@ func ApplyEntriesCB(command string) {
     case "delete":
 	key := []byte(tokens[1])
 	data, stat := database.Remove(key)
-	reply, refused := _RequestRefused(stat)
+	reply, refused = _RequestRefused(stat)
 	if !refused {
 	    switch stat {
 	    case database.DELETED:
@@ -187,6 +190,7 @@ func ApplyEntriesCB(command string) {
     default:
 	fmt.Println("error command not supported")
     }
+    return reply, !refused
 }
 
 // Parse and execute request: put, get, and delete.
@@ -221,29 +225,55 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte(errmsg))
 	    return
 	}
-	<- ClientChan
-	//response := <- ClientChan
-	//fmt.Println("Received from RAFT: ", response)
 
-	key := []byte(tokens[1])
-	data := msg[4 + len(tokens[1]) + 1:]
-	data = strings.TrimSuffix(data, "\r\n")
-	value := []byte(data)
-
-	stat := database.Insert(key, value)
-	reply, refused := _RequestRefused(stat)
-	if !refused {
-	    switch stat {
-	    case database.CREATED:
-		reply = "put_success " + tokens[1] + "\r\n"
-	    case database.UPDATED:
-		reply = "put_update " + tokens[1] + "\r\n"
-	    default:
-		reply = "put_error\r\n"
+	response := <- ClientChan
+	if response == "error" {
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
 	    }
+	    conn.Write([]byte(errmsg))
+	    return
 	}
+
+	// do the same in delete
+	reply, _ := ApplyEntriesCB(response)
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+
+//	var reply string = ""
+//	for response := range ClientChan {
+//	    apply_key := strings.Fields(response)[1]
+//	    reply, _ = ApplyEntriesCB(response)
+//	    log.Log(reply, "ALL")
+//	    if apply_key == tokens[1] {
+//		break
+//	    }
+//	}
+//	conn.Write([]byte(reply))
+
+//	key := []byte(tokens[1])
+//	data := msg[4 + len(tokens[1]) + 1:]
+//	data = strings.TrimSuffix(data, "\r\n")
+//	value := []byte(data)
+
+//	stat := database.Insert(key, value)
+//	reply, refused := _RequestRefused(stat)
+//	if !refused {
+//	    switch stat {
+//	    case database.CREATED:
+//		reply = "put_success " + tokens[1] + "\r\n"
+//	    case database.UPDATED:
+//		reply = "put_update " + tokens[1] + "\r\n"
+//	    default:
+//		reply = "put_error\r\n"
+//	    }
+//	}
+//	log.Log(reply, "ALL")
+//	conn.Write([]byte(reply))
     case "get":
 	if len(tokens) < 2 {
 	    conn.Write([]byte("error: missing arguments\r\n"))
@@ -277,23 +307,35 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte(errmsg))
 	    return
 	}
-	<- ClientChan
-	//response := <- ClientChan
-	//fmt.Println("Received from RAFT: ", response)
 
-	key := []byte(tokens[1])
-	data, stat := database.Remove(key)
-	reply, refused := _RequestRefused(stat)
-	if !refused {
-	    switch stat {
-	    case database.DELETED:
-		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
-	    default:
-		reply = "delete_error " + tokens[1] + "\r\n"
+	var reply string = ""
+	for response := range ClientChan {
+	    apply_key := strings.Fields(response)[1]
+	    reply, _ = ApplyEntriesCB(response)
+	    log.Log(reply, "ALL")
+	    if apply_key == tokens[1] {
+		break
 	    }
 	}
-	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+
+//	<- ClientChan
+//	response := <- ClientChan
+//	fmt.Println("Received from RAFT: ", response)
+
+//	key := []byte(tokens[1])
+//	data, stat := database.Remove(key)
+//	reply, refused := _RequestRefused(stat)
+//	if !refused {
+//	    switch stat {
+//	    case database.DELETED:
+//		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
+//	    default:
+//		reply = "delete_error " + tokens[1] + "\r\n"
+//	    }
+//	}
+//	log.Log(reply, "ALL")
+//	conn.Write([]byte(reply))
     default:
 	conn.Write([]byte("error command not supported\r\n"))
     }

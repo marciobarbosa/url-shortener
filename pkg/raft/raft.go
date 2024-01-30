@@ -43,6 +43,7 @@ type LogEntry struct {
     Term int32
     Command string
 }
+type ApplyCB func(string) (string, bool)
 
 var state int			// current state
 var commitidx int32		// index of highest log entry known to be committed
@@ -57,11 +58,11 @@ var server_matchidx map[int]int	// highest log index known to be replicated on e
 
 var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
 var ClientChan chan<- string	// channel to notify the application that new entries can be applied
-var ApplyChangesCB func(string)	// callback to apply changes to the state machine
+var ApplyChangesCB ApplyCB // callback to apply changes to the state machine
 
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(string), dir string, debug bool) error {
+func Start(ipaddr string, servers []string, cli_chan chan<- string, cb ApplyCB, dir string, debug bool) error {
     var err error
     var params raftdb.InitParams
 
