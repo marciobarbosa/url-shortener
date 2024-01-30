@@ -95,13 +95,20 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
 	return err
     }
     logs_len = LogGetSize()
-    SetTerm(0)
-    SetVotedFor(-1)
 
+    _, err = GetTerm()
+    if err != nil {
+	SetTerm(0)
+    }
+    _, err = GetVotedFor()
+    if err != nil {
+	SetVotedFor(-1)
+    }
     _, err = GetLastApplied()
     if err != nil {
 	SetLastApplied(-1)
     }
+
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
 

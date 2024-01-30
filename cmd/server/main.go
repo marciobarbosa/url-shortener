@@ -157,15 +157,13 @@ func ApplyEntriesCB(command string) {
 	    switch stat {
 	    case database.CREATED:
 		reply = "put_success " + tokens[1] + "\r\n"
-		fmt.Println("Reply: ", reply)
 	    case database.UPDATED:
 		reply = "put_update " + tokens[1] + "\r\n"
-		fmt.Println("Reply: ", reply)
 	    default:
 		reply = "put_error\r\n"
-		fmt.Println("Reply: ", reply)
 	    }
 	}
+	log.Log(reply, "ALL")
     case "delete":
 	key := []byte(tokens[1])
 	data, stat := database.Remove(key)
@@ -174,12 +172,11 @@ func ApplyEntriesCB(command string) {
 	    switch stat {
 	    case database.DELETED:
 		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
-		fmt.Println("Reply: ", reply)
 	    default:
 		reply = "delete_error " + tokens[1] + "\r\n"
-		fmt.Println("Reply: ", reply)
 	    }
 	}
+	log.Log(reply, "ALL")
     default:
 	fmt.Println("error command not supported")
     }
@@ -211,7 +208,7 @@ func ParseMessage(conn net.Conn, msg string) {
 	    return
 	}
 	response := <- ClientChan
-	fmt.Println("Received from RAFT: ", response)
+	//fmt.Println("Received from RAFT: ", response)
 
 	key := []byte(tokens[1])
 	data := msg[4 + len(tokens[1]) + 1:]
@@ -261,7 +258,7 @@ func ParseMessage(conn net.Conn, msg string) {
 	    return
 	}
 	response := <- ClientChan
-	fmt.Println("Received from RAFT: ", response)
+	//fmt.Println("Received from RAFT: ", response)
 
 	key := []byte(tokens[1])
 	data, stat := database.Remove(key)
