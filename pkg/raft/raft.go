@@ -54,7 +54,6 @@ var cluster map[int]Server	// servers in the cluster
 var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
 
-var lastapplied int32		// index of highest log entry applied to state machine
 var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
 var ClientChan chan<- string	// channel to notify the application that new entries can be applied
 var ApplyChangesCB func(string)	// callback to apply changes to the state machine
@@ -73,7 +72,6 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     server_nextidx = make(map[int]int)
     server_matchidx = make(map[int]int)
 
-    lastapplied = -1
     ApplyChangesCB = cb
     ClientChan = cli_chan
     CommitChan = make(chan struct{}, 16)
@@ -100,6 +98,10 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     SetTerm(0)
     SetVotedFor(-1)
 
+    _, err = GetLastApplied()
+    if err != nil {
+	SetLastApplied(-1)
+    }
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
 
@@ -476,13 +478,16 @@ func ApplyLogEntries() {
 	    break
 	}
 	mutex.Lock()
-	last_applied := lastapplied
-	if commitidx > lastapplied {
+	last_applied, err := GetLastApplied()
+	if err != nil {
+	    panic(err)
+	}
+	if commitidx > last_applied {
 	    entries, err = LogGetRange(last_applied + 1, commitidx)
 	    if err != nil {
 		panic(err)
 	    }
-	    lastapplied = commitidx
+	    SetLastApplied(commitidx)
 	}
 	mutex.Unlock()
 
@@ -500,13 +505,16 @@ func ApplyLogEntriesFollower() {
     if shutdown {
 	return
     }
-    last_applied := lastapplied
-    if commitidx > lastapplied {
+    last_applied, err := GetLastApplied()
+    if err != nil {
+	panic(err)
+    }
+    if commitidx > last_applied {
 	entries, err = LogGetRange(last_applied + 1, commitidx)
 	if err != nil {
 	    panic(err)
 	}
-	lastapplied = commitidx
+	SetLastApplied(commitidx)
     }
     for _, entry := range entries {
 	ApplyChangesCB(entry.Command)
@@ -547,12 +555,20 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
     if args.Term > term {
 	DebugMsg("AppendEntries: better term from " + cluster[int(args.LeaderId)].Addr)
 	BecomeFollower(args.Term)
+	term, err = GetTerm()
+	if err != nil {
+	    panic(err)
+	}
     }
     if args.Term == term {
 	if state != FOLLOWER {
 	    // candidate that find out that another peer won the election for
 	    // this term.
 	    BecomeFollower(args.Term)
+	    term, err = GetTerm()
+	    if err != nil {
+		panic(err)
+	    }
 	}
 	lastiteraction = time.Now()
 
@@ -585,6 +601,10 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 
 	    if newidx < len(args.Entries) {
 		// append new entries
+		fmt.Printf("Appending %d entries\n", len(args.Entries) - newidx)
+		for _, entry := range args.Entries {
+		    fmt.Printf("%d: %s\n", entry.Term, entry.Command)
+		}
 		err := LogReWrite(insertidx, args.Entries[newidx:])
 		if err != nil {
 		    panic(err)
@@ -645,6 +665,10 @@ func (r *RaftRPC) RequestVote(args *VoteRequest, reply *VoteReply) error {
     if args.Term > term {
 	DebugMsg("RequestVote: better term from " + cluster[int(args.CandidateId)].Addr)
 	BecomeFollower(args.Term)
+	term, err = GetTerm()
+	if err != nil {
+	    panic(err)
+	}
     }
     votedfor, err := GetVotedFor()
     if err != nil {
@@ -706,6 +730,29 @@ func GetVotedFor() (int32, error) {
     }
     return int32(binary.LittleEndian.Uint32(value)), nil
 }
+
+func SetLastApplied(last_applied int32) {
+    key := []byte("lastapplied")
+    value := make([]byte, 4)
+
+    binary.LittleEndian.PutUint32(value, uint32(last_applied))
+    status := raftdb.Insert(key, value)
+    if status != raftdb.CREATED && status != raftdb.UPDATED {
+	fmt.Printf("Error inserting lastapplied: %d\n", status)
+	return
+    }
+}
+
+func GetLastApplied() (int32, error) {
+    key := []byte("lastapplied")
+
+    value, status := raftdb.Request(key)
+    if status != raftdb.FOUND {
+	return -1, fmt.Errorf("VotedFor not found")
+    }
+    return int32(binary.LittleEndian.Uint32(value)), nil
+}
+
 
 func LogAppend(term int32, command string) {
     key := make([]byte, 4)
