@@ -18,6 +18,13 @@ var bkport string = "43203"
 
 var host = ""
 var port = ""
+
+var kv_conn = ""
+var kv_servers []string
+
+var cmdMessage = `
+Usage: client <host>:<port>+  -- list of kv-store servers
+`
 var helpMessage = `
 connect <address> <port> 	-- connect to the specified <address:port>
 send <msg>			-- send message to the server
@@ -62,11 +69,52 @@ func execCmd(args []string) {
 	for {
 	    sent, msg := network.Send([]byte(strings.Join(args[1:], " ") + "\r"))
 	    if sent == false {
-		fmt.Println(msg)
-		log.Log(msg, "WARNING")
-		return
+		network.Disconnect()
+		newconn := false
+		for _, server := range kv_servers {
+		    if server == kv_conn {
+			continue
+		    }
+		    fmt.Printf("Trying to connect to: %s\n", server)
+		    kv_host := strings.Split(server, ":")[0]
+		    kv_port := strings.Split(server, ":")[1]
+		    connected, _ := network.Connect(kv_host, kv_port)
+		    if connected == true {
+			fmt.Printf("Connected to: %s\n", server)
+			newconn = true
+			kv_conn = server
+			break
+		    }
+		}
+		if newconn == false {
+		    fmt.Println(msg)
+		    log.Log(msg, "WARNING")
+		    return
+		}
+		continue
 	    }
-	    if msg != "server_write_lock\r\n" {
+	    if strings.Contains(msg, "error: leader:") {
+		leader := strings.Split(msg, ": ")[len(strings.Split(msg, ": ")) - 1]
+		leader = strings.TrimSuffix(leader, "\r\n")
+
+		fmt.Printf("Leader: %s\n", leader)
+
+		network.Disconnect()
+		leader_ip := strings.Split(leader, ":")[0]
+		leader_port := strings.Split(leader, ":")[1]
+
+		fmt.Printf("Connecting to leader: %s:%s\n", leader_ip, leader_port)
+
+		connected, _ := network.Connect(leader_ip, leader_port)
+		if connected == false {
+		    fmt.Println("Retrying in 2 seconds...")
+		    time.Sleep(2 * time.Second)
+		    continue
+		}
+		fmt.Printf("Connected to leader: %s:%s\n", leader_ip, leader_port)
+		continue
+	    }
+	    if msg != "server_write_lock\r\n" && msg != "error: no leader elected\r\n" {
 		log.Log(msg, "INFO")
 		fmt.Println(msg)
 		break
@@ -118,6 +166,32 @@ func execCmd(args []string) {
 func main() {
     reader := bufio.NewReader(os.Stdin)
     log.Init()
+
+    if len(os.Args) < 2 {
+	fmt.Println("Error: Incorrect arguments")
+	fmt.Println(cmdMessage)
+	return
+    }
+
+    for i := 1; i < len(os.Args); i++ {
+	server := os.Args[i]
+	kv_servers = append(kv_servers, server)
+	if strings.Contains(server, ":") == false {
+	    fmt.Println("Error: Incorrect arguments")
+	    fmt.Println(cmdMessage)
+	    return
+	}
+    }
+    for _, server := range kv_servers {
+	kv_host := strings.Split(server, ":")[0]
+	kv_port := strings.Split(server, ":")[1]
+
+	connected, _ := network.Connect(kv_host, kv_port)
+	if connected == true {
+	    kv_conn = server
+	    break
+	}
+    }
 
     for {
 	fmt.Print("EchoClient> ")

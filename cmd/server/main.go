@@ -32,6 +32,7 @@ var directory string = "."
 
 // cluster of servers
 var cluster []string
+var ports map[string]string
 
 // channel to receive enrtries that can be applied
 var ClientChan chan string
@@ -42,6 +43,8 @@ var ClientChan chan string
 //   parms: provided options
 func ParseCmd(parms []string) {
     parm_i := 0
+    ports = make(map[string]string)
+
     for {
 	parm := parms[parm_i]
 	nparams := len(parms) - parm_i
@@ -101,7 +104,11 @@ func ParseCmd(parms []string) {
 		PrintHelp()
 		os.Exit(1)
 	    }
-	    cluster = append(cluster, parms[parm_i+1])
+	    addr := parms[parm_i+1]
+	    ip := strings.Split(addr, ":")[0]
+	    port := strings.Split(addr, ":")[1]
+	    ports[ip] = port
+	    cluster = append(cluster, ip)
 	    parm_i += 2
 	case "-h":
 	    PrintHelp()
@@ -204,10 +211,18 @@ func ParseMessage(conn net.Conn, msg string) {
 	}
 	success := raft.CreateLogEntry(msg)
 	if !success {
-	    conn.Write([]byte("error: i am not the leader\r\n"))
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
+	    }
+	    conn.Write([]byte(errmsg))
 	    return
 	}
-	response := <- ClientChan
+	<- ClientChan
+	//response := <- ClientChan
 	//fmt.Println("Received from RAFT: ", response)
 
 	key := []byte(tokens[1])
@@ -254,10 +269,16 @@ func ParseMessage(conn net.Conn, msg string) {
 	}
 	success := raft.CreateLogEntry(msg)
 	if !success {
-	    conn.Write([]byte("error: i am not the leader\r\n"))
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    if exists {
+		errmsg = "error: leader: " + leader + "\r\n"
+	    }
+	    conn.Write([]byte(errmsg))
 	    return
 	}
-	response := <- ClientChan
+	<- ClientChan
+	//response := <- ClientChan
 	//fmt.Println("Received from RAFT: ", response)
 
 	key := []byte(tokens[1])

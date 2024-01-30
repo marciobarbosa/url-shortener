@@ -50,6 +50,7 @@ var lastiteraction time.Time	// last time we heard from leader or voted for a ca
 
 var logs_len int32		// number of log entries
 
+var leaderaddr string		// address of the current leader
 var cluster map[int]Server	// servers in the cluster
 var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
@@ -65,6 +66,7 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb func(stri
     var params raftdb.InitParams
 
     commitidx = -1
+    leaderaddr = ""
     state = FOLLOWER
     lastiteraction = time.Now()
 
@@ -160,6 +162,14 @@ func Stop() {
 	trace = false
     }
     listener.Close()
+}
+
+func GetCurrentLeader() (string, bool) {
+    mutex.Lock()
+    leader := leaderaddr
+    mutex.Unlock()
+
+    return leader, leader != ""
 }
 
 func BecomeFollower(newterm int32) {
@@ -605,13 +615,10 @@ func (r *RaftRPC) AppendEntries(args *AppendEntriesRequest, reply *AppendEntries
 		newidx++
 	    }
 	    //PrintLog(cluster[args.LeaderId].Addr, args.Entries[newidx:])
+	    leaderaddr = cluster[int(args.LeaderId)].Addr
 
 	    if newidx < len(args.Entries) {
 		// append new entries
-		fmt.Printf("Appending %d entries\n", len(args.Entries) - newidx)
-		for _, entry := range args.Entries {
-		    fmt.Printf("%d: %s\n", entry.Term, entry.Command)
-		}
 		err := LogReWrite(insertidx, args.Entries[newidx:])
 		if err != nil {
 		    panic(err)
