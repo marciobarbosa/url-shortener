@@ -1,0 +1,145 @@
+#!/usr/bin/bash
+
+INPUT_FILE=input.csv
+OUTPUT_FILE=output.csv
+
+EXPECTED_FILE=expected.csv
+RESULT_FILE=result.csv
+
+N_ENTRIES=10000
+
+kv0_cmd="docker run -d -v /tmp/kv-server0:/tmp --rm -p 43203:43203 --name kv-server0 --network docker-net kv-server -a kv-server0 -p 43203 -ll DEBUG -d /tmp/process_data -s LFU -c 256 -n kv-server0:43203 -n kv-server1:44671 -n kv-server2:44577"
+kv1_cmd="docker run -d -v /tmp/kv-server1:/tmp --rm -p 44671:44671 --name kv-server1 --network docker-net kv-server -a kv-server1 -p 44671 -ll DEBUG -d /tmp/process_data -s LFU -c 256 -n kv-server0:43203 -n kv-server1:44671 -n kv-server2:44577"
+kv2_cmd="docker run -d -v /tmp/kv-server2:/tmp --rm -p 44577:44577 --name kv-server2 --network docker-net kv-server -a kv-server2 -p 44577 -ll DEBUG -d /tmp/process_data -s LFU -c 256 -n kv-server0:43203 -n kv-server1:44671 -n kv-server2:44577"
+
+crash_server() {
+    local cname="$1"
+    local delay_seconds="$2"
+
+    echo "Stopping container $cname..."
+    docker stop "$cname"
+
+    sleep "$delay_seconds"
+
+    echo "Starting container $cname (after $delay_seconds)..."
+    if [ "$cname" == "kv-server0" ]; then
+	eval "$kv0_cmd"
+    elif [ "$cname" == "kv-server1" ]; then
+	eval "$kv1_cmd"
+    elif [ "$cname" == "kv-server2" ]; then
+	eval "$kv2_cmd"
+    else
+	echo "Invalid container name: $cname"
+    fi
+}
+
+crash_random_server() {
+    local container_names=("kv-server0" "kv-server1" "kv-server2")
+    local selected_container=${container_names[$((RANDOM % ${#container_names[@]}))]}
+    local random_delay=$((RANDOM % 11 + 30))
+
+    crash_server "$selected_container" "$random_delay"
+}
+
+simulate_crashes() {
+    while :
+    do
+	crash_random_server
+ 	sleep 120
+    done
+}
+
+create_entries() {
+    local filename="$1"
+    local num_entries="$2"
+
+    generate_random_string() {
+	local length="$1"
+	cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w "$length" | head -n 1
+    }
+
+    for ((i=1; i<=num_entries; i++)); do
+	key=$(generate_random_string $((RANDOM%10+1)))
+	value=$(generate_random_string $((RANDOM%20+5)))
+	echo -e "${key}\t${value}" >> "$filename"
+    done
+}
+
+# Create entries to be inserted into the servers
+create_entries "$INPUT_FILE" "$N_ENTRIES"
+
+# Create expected output
+tac "$INPUT_FILE" | awk -F'\t' '!seen[$1]++' | tac > "$EXPECTED_FILE"
+
+# Create docker network
+docker network create -d bridge docker-net
+
+# Create directory for each server
+mkdir /tmp/kv-server0 /tmp/kv-server1 /tmp/kv-server2
+
+# Create 3 kv-servers
+eval "$kv0_cmd"
+eval "$kv1_cmd"
+eval "$kv2_cmd"
+
+# Create directory for the client
+mkdir /tmp/kv-client
+cp $INPUT_FILE /tmp/kv-client
+cp $EXPECTED_FILE /tmp/kv-client
+
+# Simulate crashes every 5 seconds
+simulate_crashes &
+crasher_pid=$!
+
+# Create client and run the tests
+cmd="push /tmp/${INPUT_FILE}\ndisconnect\nquit\n"
+output=$(printf "$cmd" | docker run -i -v /tmp/kv-client/:/tmp/ --network docker-net client kv-server0:43203 kv-server1:44671 kv-server2:44577)
+
+# Kill the crasher
+echo "Killing crasher..."
+kill -9 "$crasher_pid"
+
+# Check if kv-servers are up and running and start the ones that are not
+if [ -z "$(docker ps -q -f name=kv-server0)" ]; then
+    echo "Starting kv-server0..."
+    eval "$kv0_cmd"
+fi
+
+if [ -z "$(docker ps -q -f name=kv-server1)" ]; then
+    echo "Starting kv-server1..."
+    eval "$kv1_cmd"
+fi
+
+if [ -z "$(docker ps -q -f name=kv-server2)" ]; then
+    echo "Starting kv-server2..."
+    eval "$kv2_cmd"
+fi
+
+# Let servers sync
+echo "Letting servers sync..."
+sleep 30
+
+# Get the results
+cmd="pull /tmp/${INPUT_FILE} /tmp/${OUTPUT_FILE}\ndisconnect\nquit\n"
+output=$(printf "$cmd" | docker run -i -v /tmp/kv-client/:/tmp/ --network docker-net client kv-server0:43203 kv-server1:44671 kv-server2:44577)
+
+# Remove duplicate entries from the output
+tac /tmp/kv-client/${OUTPUT_FILE} | awk -F'\t' '!seen[$1]++' | tac > /tmp/kv-client/${RESULT_FILE}
+
+# Check if the output is correct compared to the input.
+if diff -q /tmp/kv-client/${EXPECTED_FILE} /tmp/kv-client/${RESULT_FILE} > /dev/null; then
+    echo
+    echo "*** [PASS] ***"
+    echo
+else
+    echo
+    echo "--- [FAIL] ---"
+    echo
+fi
+
+# Kill all the servers
+docker stop kv-server0 kv-server1 kv-server2
+
+# Remove created files and directories
+rm $INPUT_FILE $EXPECTED_FILE
+sudo rm -rf /tmp/kv-server0 /tmp/kv-server1 /tmp/kv-server2 /tmp/kv-client
