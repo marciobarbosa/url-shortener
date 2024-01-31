@@ -32,6 +32,10 @@ var directory string = "."
 
 // cluster of servers
 var cluster []string
+var ports map[string]string
+
+// channel to communicate with the database layer
+var DBChan chan string
 
 // Parse options given by the user
 //
@@ -39,6 +43,8 @@ var cluster []string
 //   parms: provided options
 func ParseCmd(parms []string) {
     parm_i := 0
+    ports = make(map[string]string)
+
     for {
 	parm := parms[parm_i]
 	nparams := len(parms) - parm_i
@@ -98,7 +104,11 @@ func ParseCmd(parms []string) {
 		PrintHelp()
 		os.Exit(1)
 	    }
-	    cluster = append(cluster, parms[parm_i+1])
+	    addr := parms[parm_i+1]
+	    ip := strings.Split(addr, ":")[0]
+	    port := strings.Split(addr, ":")[1]
+	    ports[ip] = port
+	    cluster = append(cluster, ip)
 	    parm_i += 2
 	case "-h":
 	    PrintHelp()
@@ -137,6 +147,52 @@ func _RequestRefused(stat database.Status) (string, bool) {
     return message, refused
 }
 
+func ApplyEntriesCB(command string) (string, bool) {
+    var reply string = ""
+    var refused bool = true
+
+    tokens := strings.Fields(command)
+    cmd := tokens[0]
+
+    switch cmd {
+    case "put":
+	key := []byte(tokens[1])
+	data := command[4 + len(tokens[1]) + 1:]
+	data = strings.TrimSuffix(data, "\r\n")
+	value := []byte(data)
+
+	stat := database.Insert(key, value)
+	reply, refused = _RequestRefused(stat)
+	if !refused {
+	    switch stat {
+	    case database.CREATED:
+		reply = "put_success " + tokens[1] + "\r\n"
+	    case database.UPDATED:
+		reply = "put_update " + tokens[1] + "\r\n"
+	    default:
+		reply = "put_error\r\n"
+	    }
+	}
+	log.Log(reply, "ALL")
+    case "delete":
+	key := []byte(tokens[1])
+	data, stat := database.Remove(key)
+	reply, refused = _RequestRefused(stat)
+	if !refused {
+	    switch stat {
+	    case database.DELETED:
+		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
+	    default:
+		reply = "delete_error " + tokens[1] + "\r\n"
+	    }
+	}
+	log.Log(reply, "ALL")
+    default:
+	fmt.Println("error command not supported")
+    }
+    return reply, !refused
+}
+
 // Parse and execute request: put, get, and delete.
 //
 // Parameters:
@@ -157,25 +213,39 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte("error: missing arguments\r\n"))
 	    return
 	}
-	key := []byte(tokens[1])
-	data := msg[4 + len(tokens[1]) + 1:]
-	data = strings.TrimSuffix(data, "\r\n")
-	value := []byte(data)
-
-	stat := database.Insert(key, value)
-	reply, refused := _RequestRefused(stat)
-	if !refused {
-	    switch stat {
-	    case database.CREATED:
-		reply = "put_success " + tokens[1] + "\r\n"
-	    case database.UPDATED:
-		reply = "put_update " + tokens[1] + "\r\n"
-	    default:
-		reply = "put_error\r\n"
+	ClientChan := make(chan string)
+	success := raft.CreateLogEntry(msg, ClientChan)
+	if !success {
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
 	    }
+	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
+	    return
 	}
+
+	response := <- ClientChan
+	if response == "error" {
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
+	    }
+	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
+	    return
+	}
+	reply, _ := ApplyEntriesCB(response)
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+	close(ClientChan)
+
     case "get":
 	if len(tokens) < 2 {
 	    conn.Write([]byte("error: missing arguments\r\n"))
@@ -194,26 +264,54 @@ func ParseMessage(conn net.Conn, msg string) {
 	}
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+
     case "delete":
 	if len(tokens) < 2 {
 	    conn.Write([]byte("error missing arguments\r\n"))
 	    return
 	}
-	key := []byte(tokens[1])
-	data, stat := database.Remove(key)
-	reply, refused := _RequestRefused(stat)
-	if !refused {
-	    switch stat {
-	    case database.DELETED:
-		reply = "delete_success " + tokens[1] + " " + string(data) + "\r\n"
-	    default:
-		reply = "delete_error " + tokens[1] + "\r\n"
+	ClientChan := make(chan string)
+	success := raft.CreateLogEntry(msg, ClientChan)
+	if !success {
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
 	    }
+	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
+	    return
 	}
+
+	response := <- ClientChan
+	if response == "error" {
+	    errmsg := "error: no leader elected\r\n"
+	    leader, exists := raft.GetCurrentLeader()
+	    leader_ip := strings.Split(leader, ":")[0]
+	    leader_kv := leader_ip + ":" + ports[leader_ip]
+	    if exists {
+		errmsg = "error: leader: " + leader_kv + "\r\n"
+	    }
+	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
+	    return
+	}
+	reply, _ := ApplyEntriesCB(response)
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+	close(ClientChan)
+
     default:
 	conn.Write([]byte("error command not supported\r\n"))
+    }
+}
+
+func CommitEntryProc() {
+    for command := range DBChan {
+	reply, _ := ApplyEntriesCB(command)
+	log.Log(reply, "ALL")
     }
 }
 
@@ -272,7 +370,10 @@ func Start() {
     if loglevel == "DEBUG" {
 	debug = true
     }
-    raft.Start(ipaddr, cluster, debug)
+    DBChan = make(chan string)
+
+    raft.Start(ipaddr, cluster, DBChan, ApplyEntriesCB, directory, debug)
+    go CommitEntryProc()
 
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 
@@ -283,6 +384,7 @@ func Start() {
 	<-sigs
 	raft.Stop()
 	segment.FlushCache()
+	close(DBChan)
 	os.Exit(0)
     }()
 
