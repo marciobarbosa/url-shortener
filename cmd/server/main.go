@@ -34,8 +34,8 @@ var directory string = "."
 var cluster []string
 var ports map[string]string
 
-// channel to receive enrtries that can be applied
-var ClientChan chan string
+// channel to communicate with the database layer
+var DBChan chan string
 
 // Parse options given by the user
 //
@@ -213,7 +213,9 @@ func ParseMessage(conn net.Conn, msg string) {
 	    conn.Write([]byte("error: missing arguments\r\n"))
 	    return
 	}
-	success := raft.CreateLogEntry(msg)
+
+	ClientChan := make(chan string)
+	success := raft.CreateLogEntry(msg, ClientChan)
 	if !success {
 	    errmsg := "error: no leader elected\r\n"
 	    leader, exists := raft.GetCurrentLeader()
@@ -223,6 +225,7 @@ func ParseMessage(conn net.Conn, msg string) {
 		errmsg = "error: leader: " + leader_kv + "\r\n"
 	    }
 	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
 	    return
 	}
 
@@ -236,6 +239,7 @@ func ParseMessage(conn net.Conn, msg string) {
 		errmsg = "error: leader: " + leader_kv + "\r\n"
 	    }
 	    conn.Write([]byte(errmsg))
+	    close(ClientChan)
 	    return
 	}
 
@@ -243,6 +247,7 @@ func ParseMessage(conn net.Conn, msg string) {
 	reply, _ := ApplyEntriesCB(response)
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
+	close(ClientChan)
 
 //	var reply string = ""
 //	for response := range ClientChan {
@@ -293,31 +298,31 @@ func ParseMessage(conn net.Conn, msg string) {
 	log.Log(reply, "ALL")
 	conn.Write([]byte(reply))
     case "delete":
-	if len(tokens) < 2 {
-	    conn.Write([]byte("error missing arguments\r\n"))
-	    return
-	}
-	success := raft.CreateLogEntry(msg)
-	if !success {
-	    errmsg := "error: no leader elected\r\n"
-	    leader, exists := raft.GetCurrentLeader()
-	    if exists {
-		errmsg = "error: leader: " + leader + "\r\n"
-	    }
-	    conn.Write([]byte(errmsg))
-	    return
-	}
-
-	var reply string = ""
-	for response := range ClientChan {
-	    apply_key := strings.Fields(response)[1]
-	    reply, _ = ApplyEntriesCB(response)
-	    log.Log(reply, "ALL")
-	    if apply_key == tokens[1] {
-		break
-	    }
-	}
-	conn.Write([]byte(reply))
+//	if len(tokens) < 2 {
+//	    conn.Write([]byte("error missing arguments\r\n"))
+//	    return
+//	}
+//	success := raft.CreateLogEntry(msg)
+//	if !success {
+//	    errmsg := "error: no leader elected\r\n"
+//	    leader, exists := raft.GetCurrentLeader()
+//	    if exists {
+//		errmsg = "error: leader: " + leader + "\r\n"
+//	    }
+//	    conn.Write([]byte(errmsg))
+//	    return
+//	}
+//
+//	var reply string = ""
+//	for response := range ClientChan {
+//	    apply_key := strings.Fields(response)[1]
+//	    reply, _ = ApplyEntriesCB(response)
+//	    log.Log(reply, "ALL")
+//	    if apply_key == tokens[1] {
+//		break
+//	    }
+//	}
+//	conn.Write([]byte(reply))
 
 //	<- ClientChan
 //	response := <- ClientChan
@@ -338,6 +343,14 @@ func ParseMessage(conn net.Conn, msg string) {
 //	conn.Write([]byte(reply))
     default:
 	conn.Write([]byte("error command not supported\r\n"))
+    }
+}
+
+func CommitEntryProc() {
+    for command := range DBChan {
+	fmt.Println("CommitEntryProc: ", command)
+	reply, _ := ApplyEntriesCB(command)
+	log.Log(reply, "ALL")
     }
 }
 
@@ -396,8 +409,10 @@ func Start() {
     if loglevel == "DEBUG" {
 	debug = true
     }
-    ClientChan = make(chan string)
-    raft.Start(ipaddr, cluster, ClientChan, ApplyEntriesCB, directory, debug)
+    DBChan = make(chan string)
+
+    raft.Start(ipaddr, cluster, DBChan, ApplyEntriesCB, directory, debug)
+    go CommitEntryProc()
 
     log.Log("Listening on host: " + ipaddr + ", port: " + port, "INFO")
 
@@ -407,8 +422,8 @@ func Start() {
     go func() {
 	<-sigs
 	raft.Stop()
-	close(ClientChan)
 	segment.FlushCache()
+	close(DBChan)
 	os.Exit(0)
     }()
 

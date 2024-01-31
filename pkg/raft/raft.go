@@ -57,12 +57,15 @@ var server_nextidx map[int]int	// next log index to send to each server
 var server_matchidx map[int]int	// highest log index known to be replicated on each server
 
 var CommitChan chan struct{}	// channel to notify ApplyLogEntries() that new entries can be committed
-var ClientChan chan<- string	// channel to notify the application that new entries can be applied
-var ApplyChangesCB ApplyCB // callback to apply changes to the state machine
+var DBChan chan string		// channel to notify the application that a new command has been committed
+var ApplyChangesCB ApplyCB 	// callback to apply changes to the state machine
 
 var mutex sync.Mutex		// lock for shared data
 
-func Start(ipaddr string, servers []string, cli_chan chan<- string, cb ApplyCB, dir string, debug bool) error {
+// channel to notify the application that a new command has been committed
+var ClientChan map[string]chan string
+
+func Start(ipaddr string, servers []string, dbchan chan string, cb ApplyCB, dir string, debug bool) error {
     var err error
     var params raftdb.InitParams
 
@@ -75,9 +78,10 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb ApplyCB, 
     server_nextidx = make(map[int]int)
     server_matchidx = make(map[int]int)
 
+    DBChan = dbchan
     ApplyChangesCB = cb
-    ClientChan = cli_chan
     CommitChan = make(chan struct{}, 16)
+    ClientChan = make(map[string]chan string)
 
     if (debug) {
 	trace = true
@@ -138,7 +142,7 @@ func Start(ipaddr string, servers []string, cli_chan chan<- string, cb ApplyCB, 
     return nil
 }
 
-func CreateLogEntry(command string) bool {
+func CreateLogEntry(command string, cli_chan chan string) bool {
     mutex.Lock()
     defer mutex.Unlock()
 
@@ -147,6 +151,7 @@ func CreateLogEntry(command string) bool {
 	if err != nil {
 	    panic(err)
 	}
+	ClientChan[command] = cli_chan
 	LogAppend(term, command)
 	return true
     }
@@ -174,6 +179,12 @@ func GetCurrentLeader() (string, bool) {
 }
 
 func BecomeFollower(newterm int32) {
+    if state == LEADER {
+	for _, cli_chan := range ClientChan {
+	    cli_chan <- "error"
+	}
+	ClientChan = make(map[string]chan string)
+    }
     state = FOLLOWER
     SetTerm(newterm)
     SetVotedFor(-1)
@@ -510,7 +521,12 @@ func ApplyLogEntries() {
 	mutex.Unlock()
 
 	for _, entry := range entries {
-	    ClientChan <- entry.Command
+	    if ClientChan[entry.Command] == nil {
+		DBChan <- entry.Command
+		continue
+	    }
+	    ClientChan[entry.Command] <- entry.Command
+	    delete(ClientChan, entry.Command)
 	}
     }
     DebugMsg("ApplyLogEntries stopped")
