@@ -29,8 +29,7 @@ run_server: release_server
 	docker container run kv-server
 
 test: build_client build_server
-	${TEST_DIR}/localtests ${BIN_DIR}/client ${BIN_DIR}/kv-server ${BIN_DIR}/database
-	rm -rf ${BIN_DIR}/database
+	${TEST_DIR}/systemtesting
 
 clean:
 	go clean
