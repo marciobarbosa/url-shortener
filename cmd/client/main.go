@@ -259,6 +259,9 @@ func execCmd(args []string) {
 }
 
 func main() {
+    var intput string
+    var output string
+
     reader := bufio.NewReader(os.Stdin)
     log.Init()
 
@@ -269,6 +272,17 @@ func main() {
     }
 
     for i := 1; i < len(os.Args); i++ {
+	if os.Args[i] == "-push" {
+	    intput = os.Args[i + 1]
+	    i++
+	    continue
+	}
+	if os.Args[i] == "-pull" {
+	    intput = os.Args[i + 1]
+	    output = os.Args[i + 2]
+	    i += 2
+	    continue
+	}
 	server := os.Args[i]
 	kv_servers = append(kv_servers, server)
 	if strings.Contains(server, ":") == false {
@@ -286,6 +300,17 @@ func main() {
 	    kv_conn = server
 	    break
 	}
+    }
+
+    if output != "" {
+	args := []string{"pull", intput, output}
+	execCmd(args)
+	return
+    }
+    if intput != "" {
+	args := []string{"push", intput}
+	execCmd(args)
+	return
     }
 
     for {
