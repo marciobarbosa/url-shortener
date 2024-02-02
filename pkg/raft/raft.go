@@ -14,7 +14,7 @@ import (
     "github.com/marciobarbosa/url-shortener/pkg/raftdb"
 )
 
-const port = "8082"
+const port = "44578"
 const retryinterval = 5 * time.Second
 const timeout = 2 * time.Second
 
@@ -119,7 +119,7 @@ func Start(ipaddr string, servers []string, dbchan chan string, cb ApplyCB, dir 
     raftrpc := new(RaftRPC)
     rpc.Register(raftrpc)
 
-    listener, err = net.Listen("tcp", ipaddr + ":" + port)
+    listener, err = net.Listen("tcp", "0.0.0.0" + ":" + port)
     if err != nil {
 	return err
     }
@@ -453,7 +453,7 @@ func DebugMsg(msg string) {
 // this time, start an election. Also, bail out if we became the leader or our
 // term has changed.
 func ElectionTimer() {
-    timeout := time.Duration(150 + rand.Intn(150)) * time.Millisecond
+    timeout := time.Duration(6000 + rand.Intn(3000)) * time.Millisecond
 
     mutex.Lock()
     term, err := GetTerm()
