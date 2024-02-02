@@ -28,7 +28,7 @@ run_client: release_client
 run_server: release_server
 	docker container run kv-server
 
-test: build_client build_server
+test: release_client release_server
 	${TEST_DIR}/systemtesting
 
 clean:
