@@ -359,7 +359,7 @@ func Start() {
 	panic(errors.New("No cluster provided"))
     }
 
-    addr := ipaddr + ":" + port
+    addr := "0.0.0.0" + ":" + port
     ln, err := net.Listen("tcp", addr)
     if err != nil {
 	panic(err)
