@@ -224,7 +224,7 @@ func _RecoverFromCrash() (error) {
 	data, nbytes := raftdisk.ReadData(rfile, offset, valsize)
 	offset += uint64(nbytes)
 
-	_, err := Put(kblob, data)
+	_, err := _Put(kblob, data)
 	if err != nil {
 	    return err
 	}
@@ -592,16 +592,7 @@ func FlushCache() {
 //   true: if entry already exists and has been updated.
 //   false: if entry has been created.
 //   error: error, if any.
-func Put(key []byte, value []byte) (bool, error) {
-    rwlock.Lock()
-    if state == OFF {
-	rwlock.Unlock()
-	return false, errors.New("Offline")
-    }
-    if state != RUNNING {
-	rwlock.Unlock()
-	return false, errors.New("Busy")
-    }
+func _Put(key []byte, value []byte) (bool, error) {
     _, exists := cache.Get(string(key))
     if !exists {
 	_, exists = indextable[string(key)]
@@ -613,6 +604,21 @@ func Put(key []byte, value []byte) (bool, error) {
     _RecoverLogAdd(key, value)
     cache.Put(string(key), value)
     cachelen++
+
+    return exists, nil
+}
+
+func Put(key []byte, value []byte) (bool, error) {
+    rwlock.Lock()
+    if state == OFF {
+	rwlock.Unlock()
+	return false, errors.New("Offline")
+    }
+    if state != RUNNING {
+	rwlock.Unlock()
+	return false, errors.New("Busy")
+    }
+    exists, _ := _Put(key, value)
     rwlock.Unlock()
     return exists, nil
 }
