@@ -453,7 +453,7 @@ func DebugMsg(msg string) {
 // this time, start an election. Also, bail out if we became the leader or our
 // term has changed.
 func ElectionTimer() {
-    timeout := time.Duration(6000 + rand.Intn(3000)) * time.Millisecond
+    timeout := time.Duration(12000 + rand.Intn(3000)) * time.Millisecond
 
     mutex.Lock()
     term, err := GetTerm()
